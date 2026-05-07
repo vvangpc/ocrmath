@@ -5,13 +5,14 @@ import hashlib
 import sys
 import traceback
 
-from PyQt6.QtCore import Qt, QObject, QTimer, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import Qt, QObject, QTimer, QEventLoop, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QAction, QIcon, QPainter, QPixmap, QColor, QFont
 from PyQt6.QtWidgets import (
     QApplication, QSystemTrayIcon, QMenu, QMessageBox,
 )
 
 import config
+import webdav
 from image_client import ImageOcrWorker
 from main_window import MainWindow
 from result_window import ResultWindow
@@ -64,6 +65,11 @@ class App(QObject):
         self._current_hotkey: str = ""
         self._pending_sha: str | None = None
         self._pending_png: bytes | None = None
+        self._sync_worker: webdav.WebDavSyncWorker | None = None
+
+        self._periodic_timer = QTimer(self)
+        self._periodic_timer.setSingleShot(False)
+        self._periodic_timer.timeout.connect(self._on_periodic_tick)
 
         # Storage
         self.storage = Storage()
@@ -77,6 +83,7 @@ class App(QObject):
             get_creds=self._get_creds,
             storage=self.storage,
             on_open_history=self._on_history_open,
+            on_sync_now=self._sync_now_manual,
         )
 
         self.snipper.captured.connect(self._on_captured)
@@ -99,24 +106,43 @@ class App(QObject):
         if config.load() is None:
             self.open_settings(first_run=True)
 
+        # Startup auto-sync (best-effort, after UI is up)
+        self._reconfigure_periodic_timer()
+        QTimer.singleShot(1000, self._maybe_backfill_usage)
+        QTimer.singleShot(2000, self._kickoff_startup_sync)
+        QTimer.singleShot(3000, self._kickoff_cache_purge)
+
     # ---- credentials -------------------------------------------------------
 
     def _get_creds(self) -> dict | None:
         return config.load()
 
     def open_settings(self, first_run: bool = False) -> None:
-        dlg = SettingsDialog(self.main_win)
+        dlg = SettingsDialog(self.main_win, on_purge_now=self._purge_now)
         if first_run:
             dlg.setWindowTitle("欢迎 - 请先设置 Mathpix API")
         dlg.settings_changed.connect(self._on_settings_changed)
         dlg.exec()
+
+    def _purge_now(self, days: int) -> int:
+        """Synchronous purge invoked from the settings dialog."""
+        n = self.storage.purge_older_than(days)
+        self.storage.purge_old_usage(days)
+        try:
+            self.main_win.refresh_history_panel()
+            self.main_win.refresh_stats()
+        except Exception:
+            pass
+        return n
 
     def _on_settings_changed(self, old_hotkey: str, new_hotkey: str) -> None:
         if new_hotkey != self._current_hotkey:
             self._uninstall_hotkey()
             self._install_hotkey(new_hotkey)
         self.main_win.refresh_hotkey_display()
+        self.main_win.refresh_stats()
         self._refresh_tray_text()
+        self._reconfigure_periodic_timer()
 
     # ---- tray --------------------------------------------------------------
 
@@ -168,6 +194,15 @@ class App(QObject):
     def _quit(self) -> None:
         self._uninstall_hotkey()
         self._stop_busy()
+        try:
+            self._periodic_timer.stop()
+        except Exception:
+            pass
+        # Best-effort exit sync (max 5s).
+        try:
+            self._run_exit_sync_blocking(timeout_ms=5000)
+        except Exception as exc:
+            sys.stderr.write(f"exit sync failed: {exc}\n")
         self.tray.hide()
         try:
             self.storage.close()
@@ -266,6 +301,19 @@ class App(QObject):
         self._pending_sha = None
         self._pending_png = None
         self._worker = None
+        # Bill the API call: cache hits exit before we get here.
+        try:
+            config.bump_image_count(1)
+        except Exception as exc:
+            sys.stderr.write(f"counter bump failed: {exc}\n")
+        try:
+            self.storage.log_usage("image", 1, config.get_image_price())
+        except Exception as exc:
+            sys.stderr.write(f"usage log failed: {exc}\n")
+        try:
+            self.main_win.on_counters_changed()
+        except Exception:
+            pass
         # Refresh history tab if it's been viewed
         try:
             self.main_win.refresh_history_panel()
@@ -282,6 +330,137 @@ class App(QObject):
     def _on_history_open(self, rec: Recognition) -> None:
         self.result_win.show_result(rec.result, from_cache=True)
 
+    # ---- usage backfill ----------------------------------------------------
+
+    def _maybe_backfill_usage(self) -> None:
+        """One-shot migration: copy historical recognitions into usage table."""
+        if config.is_usage_backfilled():
+            return
+        try:
+            n = self.storage.backfill_image_usage(config.get_image_price())
+            config.mark_usage_backfilled()
+            if n:
+                sys.stderr.write(
+                    f"backfilled {n} historical image usage events\n")
+                try:
+                    self.main_win.refresh_stats()
+                except Exception:
+                    pass
+        except Exception as exc:
+            sys.stderr.write(f"usage backfill failed: {exc}\n")
+
+    # ---- cache retention ---------------------------------------------------
+
+    def _kickoff_cache_purge(self) -> None:
+        days = config.get_cache_retention()
+        if days <= 0:
+            return
+        try:
+            n_recs = self.storage.purge_older_than(days)
+            n_usage = self.storage.purge_old_usage(days)
+            if (n_recs or n_usage):
+                sys.stderr.write(
+                    f"cache purge: removed {n_recs} recognitions + "
+                    f"{n_usage} usage rows older than {days} days\n")
+                try:
+                    self.main_win.refresh_history_panel()
+                    self.main_win.refresh_stats()
+                except Exception:
+                    pass
+        except Exception as exc:
+            sys.stderr.write(f"cache purge failed: {exc}\n")
+
+    # ---- WebDAV sync -------------------------------------------------------
+
+    def _webdav_configured(self) -> bool:
+        wd = config.get_webdav()
+        return bool(wd["url"] and wd["user"])
+
+    def _reconfigure_periodic_timer(self) -> None:
+        """(Re)start or stop the periodic-sync QTimer based on settings.
+        Called at app startup and whenever settings are saved."""
+        wd = config.get_webdav()
+        interval_min = int(wd.get("interval") or 0)
+        if interval_min > 0 and self._webdav_configured():
+            self._periodic_timer.start(interval_min * 60_000)
+        else:
+            self._periodic_timer.stop()
+
+    def _on_periodic_tick(self) -> None:
+        self._sync_in_background()
+
+    def _kickoff_startup_sync(self) -> None:
+        if self._webdav_configured():
+            self._sync_in_background()
+
+    def _sync_in_background(self) -> None:
+        if not self._webdav_configured():
+            return
+        if self._sync_worker is not None:
+            return
+        w = webdav.WebDavSyncWorker()
+        w.finished_ok.connect(self._on_sync_ok)
+        w.failed.connect(self._on_sync_fail)
+        w.finished.connect(self._sync_cleanup)
+        self._sync_worker = w
+        w.start()
+
+    def _run_exit_sync_blocking(self, timeout_ms: int = 5000) -> None:
+        """Block UI for up to timeout_ms while a final sync completes."""
+        if not self._webdav_configured():
+            return
+        loop = QEventLoop()
+        finish_timer = QTimer()
+        finish_timer.setSingleShot(True)
+        finish_timer.timeout.connect(loop.quit)
+
+        worker = webdav.WebDavSyncWorker()
+        worker.finished_ok.connect(lambda *_a: loop.quit())
+        worker.failed.connect(
+            lambda msg: (sys.stderr.write(f"exit sync failed: {msg}\n"),
+                         loop.quit()))
+        finish_timer.start(timeout_ms)
+        worker.start()
+        loop.exec()
+        # Best-effort: give the worker a brief grace window to land its result.
+        worker.wait(500)
+
+    def _sync_now_manual(self) -> None:
+        wd = config.get_webdav()
+        if not wd["url"] or not wd["user"]:
+            QMessageBox.information(
+                None, "WebDAV 未配置",
+                "请先在设置中填写 WebDAV 服务器 URL 和用户名。")
+            return
+        if self._sync_worker is not None:
+            return
+        self.main_win.set_sync_busy(True)
+        w = webdav.WebDavSyncWorker()
+        w.finished_ok.connect(self._on_sync_ok)
+        w.failed.connect(self._on_sync_fail_manual)
+        w.finished.connect(self._sync_cleanup)
+        self._sync_worker = w
+        w.start()
+
+    def _on_sync_ok(self, _ts: float) -> None:
+        try:
+            self.main_win.refresh_stats()
+        except Exception:
+            pass
+
+    def _on_sync_fail(self, msg: str) -> None:
+        sys.stderr.write(f"webdav auto-sync failed: {msg}\n")
+
+    def _on_sync_fail_manual(self, msg: str) -> None:
+        QMessageBox.warning(None, "同步失败", msg)
+
+    def _sync_cleanup(self) -> None:
+        try:
+            self.main_win.set_sync_busy(False)
+        except Exception:
+            pass
+        self._sync_worker = None
+
 
 def _excepthook(exc_type, exc, tb) -> None:
     text = "".join(traceback.format_exception(exc_type, exc, tb))
@@ -294,6 +473,9 @@ def _excepthook(exc_type, exc, tb) -> None:
 
 def main() -> int:
     sys.excepthook = _excepthook
+    # QtWebEngine requires this before QApplication is constructed.
+    QApplication.setAttribute(
+        Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
     qapp = QApplication(sys.argv)
     qapp.setApplicationName("ocrmath")
     qapp.setStyle("Fusion")

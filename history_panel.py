@@ -214,8 +214,7 @@ class HistoryPanel(QWidget):
             return
         ret = QMessageBox.warning(
             self, "确认清空缓存",
-            f"将永久删除 {n} 条历史记录及其图像缓存。\n"
-            f"被删除的记录再次截屏时会重新调用 API（按次计费）。\n\n确认继续？",
+            f"将永久删除 {n} 条记录和图像缓存,被删除的图像再次截屏会重新调用 API。继续?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )

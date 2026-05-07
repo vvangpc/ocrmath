@@ -1,6 +1,7 @@
 """Main window — tabbed UI hosting the snipping launcher, PDF panel, history."""
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Callable
 
 from PyQt6.QtCore import Qt
@@ -17,26 +18,52 @@ from storage import Recognition, Storage
 from styles import ACCENT, MUTED
 
 
+def _format_synced(ts: float) -> str:
+    if not ts:
+        return "上次同步: —"
+    try:
+        dt = datetime.fromtimestamp(ts)
+    except Exception:
+        return "上次同步: —"
+    return "上次同步: " + dt.strftime("%Y-%m-%d %H:%M")
+
+
+def _start_of_today() -> float:
+    now = datetime.now()
+    return now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+
+def _start_of_month() -> float:
+    now = datetime.now()
+    return now.replace(day=1, hour=0, minute=0, second=0,
+                       microsecond=0).timestamp()
+
+
 class MainWindow(QMainWindow):
     def __init__(self,
                  on_snip: Callable[[], None],
                  on_open_settings: Callable[[], None],
                  get_creds: Callable[[], dict | None],
                  storage: Storage,
-                 on_open_history: Callable[[Recognition], None]):
+                 on_open_history: Callable[[Recognition], None],
+                 on_sync_now: Callable[[], None] | None = None):
         super().__init__()
         self.setWindowTitle("ocrmath - Mathpix OCR 工具")
         self.resize(700, 800)
         self._on_snip = on_snip
         self._on_open_settings = on_open_settings
+        self._on_sync_now = on_sync_now
+        self._storage = storage
         self._allow_close = False  # close button minimizes to tray instead
 
         self.snip_tab = self._build_snip_tab()
+        self.pdf_panel = PdfPanel(get_creds,
+                                  on_pages_processed=self._on_pages_processed)
         self.history_panel = HistoryPanel(storage, on_open=on_open_history)
 
         tabs = QTabWidget()
         tabs.addTab(self.snip_tab, "  截屏识别  ")
-        tabs.addTab(PdfPanel(get_creds), "  PDF 转换  ")
+        tabs.addTab(self.pdf_panel, "  PDF 转换  ")
         tabs.addTab(self.history_panel, "  历史记录  ")
         tabs.currentChanged.connect(self._on_tab_changed)
         self._tabs = tabs
@@ -48,6 +75,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(wrap)
 
         self.refresh_hotkey_display()
+        self.refresh_stats()
 
     def _build_snip_tab(self) -> QWidget:
         w = QWidget()
@@ -59,8 +87,8 @@ class MainWindow(QMainWindow):
         title.setProperty("role", "heading")
         layout.addWidget(title)
 
-        subtitle = QLabel("用全局快捷键唤起截屏，自动识别公式并复制到剪贴板。"
-                          "相同图像会命中本地缓存，零网络零费用。")
+        subtitle = QLabel("用全局快捷键唤起截屏,识别公式并复制到剪贴板。"
+                          "相同图像命中本地缓存。")
         subtitle.setProperty("role", "muted")
         subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
@@ -114,6 +142,9 @@ class MainWindow(QMainWindow):
             steps_l.addWidget(lbl)
         layout.addWidget(steps)
 
+        # Stats card
+        layout.addWidget(self._build_stats_card())
+
         layout.addStretch(1)
 
         bottom = QHBoxLayout()
@@ -122,17 +153,121 @@ class MainWindow(QMainWindow):
         bottom.addWidget(settings_btn)
         bottom.addStretch(1)
 
-        cost = QLabel("成本: 截屏 ≈ $0.002/张 ・ PDF ≈ $0.005/页")
-        cost.setProperty("role", "muted")
-        bottom.addWidget(cost)
+        self.cost_hint = QLabel("$0.002/张 · $0.005/页")
+        self.cost_hint.setProperty("role", "muted")
+        bottom.addWidget(self.cost_hint)
         layout.addLayout(bottom)
         return w
+
+    def _build_stats_card(self) -> QFrame:
+        card = QFrame()
+        card.setProperty("card", "true")
+        outer = QVBoxLayout(card)
+        outer.setContentsMargins(16, 12, 16, 12)
+        outer.setSpacing(10)
+
+        head = QLabel("使用统计")
+        head.setProperty("role", "subheading")
+        outer.addWidget(head)
+
+        tiles = QHBoxLayout()
+        tiles.setSpacing(12)
+        self.stat_image_value = self._build_stat_value("0 次")
+        self.stat_pdf_value = self._build_stat_value("0 页")
+        self.stat_cost_value = self._build_stat_value("$0.000")
+        tiles.addLayout(self._wrap_tile(self.stat_image_value, "截图识别"), 1)
+        tiles.addLayout(self._wrap_tile(self.stat_pdf_value, "PDF 转换"), 1)
+        tiles.addLayout(self._wrap_tile(self.stat_cost_value, "累计花费"), 1)
+        outer.addLayout(tiles)
+
+        self.period_summary_label = QLabel("本月: $0.000 (0 张 · 0 页)  ·  "
+                                            "今日: $0.000 (0 张 · 0 页)")
+        self.period_summary_label.setProperty("role", "muted")
+        self.period_summary_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        outer.addWidget(self.period_summary_label)
+
+        actions = QHBoxLayout()
+        refresh_btn = QPushButton("刷新")
+        refresh_btn.setFixedWidth(80)
+        refresh_btn.clicked.connect(self.refresh_stats)
+        actions.addWidget(refresh_btn)
+        actions.addStretch(1)
+        sync_btn = QPushButton("立即同步")
+        sync_btn.setObjectName("accent")
+        sync_btn.setFixedWidth(96)
+        sync_btn.clicked.connect(self._handle_sync_clicked)
+        self.sync_btn = sync_btn
+        actions.addWidget(sync_btn)
+        outer.addLayout(actions)
+
+        self.last_synced_label = QLabel(_format_synced(0))
+        self.last_synced_label.setProperty("role", "muted")
+        outer.addWidget(self.last_synced_label)
+
+        return card
+
+    def _build_stat_value(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl.setStyleSheet(
+            f"font-size: 18pt; font-weight: 700; color: {ACCENT};")
+        return lbl
+
+    def _wrap_tile(self, value_label: QLabel, caption: str) -> QVBoxLayout:
+        col = QVBoxLayout()
+        col.setSpacing(2)
+        col.addWidget(value_label)
+        cap = QLabel(caption)
+        cap.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        cap.setStyleSheet(f"color: {MUTED}; font-size: 9pt;")
+        col.addWidget(cap)
+        return col
 
     # ---- public API --------------------------------------------------------
 
     def refresh_hotkey_display(self) -> None:
         hk = config.get_hotkey()
         self.hotkey_label.setText(config.keyboard_to_qt(hk))
+
+    def refresh_stats(self) -> None:
+        img_n, pdf_n = config.get_counters()
+        ip = config.get_image_price()
+        pp = config.get_pdf_price()
+        cost = img_n * ip + pdf_n * pp
+        self.stat_image_value.setText(f"{img_n} 次")
+        self.stat_pdf_value.setText(f"{pdf_n} 页")
+        self.stat_cost_value.setText(f"${cost:.3f}")
+        self.cost_hint.setText(f"${ip:.3f}/张 · ${pp:.3f}/页")
+        self.last_synced_label.setText(_format_synced(config.get_last_synced()))
+        self._refresh_period_summary()
+        try:
+            self.pdf_panel.refresh_price_display()
+        except Exception:
+            pass
+
+    def _refresh_period_summary(self) -> None:
+        try:
+            month = self._storage.usage_summary(_start_of_month())
+            today = self._storage.usage_summary(_start_of_today())
+        except Exception:
+            return
+        self.period_summary_label.setText(
+            f"本月: ${month['total_cost']:.3f} "
+            f"({month['image_count']} 张 · {month['pdf_pages']} 页)"
+            f"  ·  "
+            f"今日: ${today['total_cost']:.3f} "
+            f"({today['image_count']} 张 · {today['pdf_pages']} 页)")
+
+    def on_counters_changed(self) -> None:
+        """Called by App after image OCR or PDF conversion bumps a counter."""
+        self.refresh_stats()
+
+    def set_sync_busy(self, busy: bool) -> None:
+        try:
+            self.sync_btn.setEnabled(not busy)
+            self.sync_btn.setText("同步中…" if busy else "立即同步")
+        except Exception:
+            pass
 
     def refresh_history_panel(self) -> None:
         try:
@@ -154,6 +289,18 @@ class MainWindow(QMainWindow):
     # ---- internal ----------------------------------------------------------
 
     def _on_tab_changed(self, idx: int) -> None:
-        # Refresh history when user switches to that tab
         if self._tabs.widget(idx) is self.history_panel:
             self.history_panel.refresh()
+        elif self._tabs.widget(idx) is self.snip_tab:
+            self.refresh_stats()
+
+    def _on_pages_processed(self, n: int) -> None:
+        try:
+            self._storage.log_usage("pdf", n, config.get_pdf_price())
+        except Exception:
+            pass
+        self.refresh_stats()
+
+    def _handle_sync_clicked(self) -> None:
+        if self._on_sync_now:
+            self._on_sync_now()

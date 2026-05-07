@@ -12,7 +12,7 @@
 | | |
 |---|---|
 | **截屏公式识别** | 全局快捷键唤起 → 鼠标拖选公式区域 → 自动识别 → 一键复制 LaTeX |
-| **LaTeX 实时预览** | 结果窗口内置 matplotlib 离线渲染，所见即所得，支持中文混排 |
+| **LaTeX 实时预览** | 结果窗口内置 MathJax 矢量渲染，所见即所得，支持中文混排 |
 | **本地缓存** | SHA256 去重，相同区域第二次识别零成本零网络 |
 | **历史记录** | 主窗口"历史记录"标签页：搜索 / 复制 / 重新打开 / 删除 |
 | **PDF 转换** | 拖拽 PDF → 选输出格式（MMD/MD/DOCX/TeX/HTML/带文字层 PDF）→ 异步进度条 |
@@ -111,7 +111,7 @@ history_panel.py   # 历史记录面板
 image_client.py    # /v3/text 调用 + QThread worker
 pdf_client.py      # /v3/pdf 提交/轮询/下载 + QThread worker
 storage.py         # SQLite 缓存 + 历史 + PNG 文件管理
-latex_preview.py   # matplotlib mathtext 离线渲染 worker（带 CJK 字体探测）
+mathjax_view.py    # MathJax 3 + QWebEngineView 矢量渲染（首次启动从 jsdelivr 下载 ~1MB）
 config.py          # DPAPI 加密读写 + 快捷键存储
 settings_dialog.py # API key + 快捷键设置对话框
 styles.py          # 全局 QSS 主题
@@ -147,7 +147,7 @@ python test_pdf_api.py path\to\small.pdf
 | 全局热键不生效 | `keyboard` 库被杀软拦截，可用主窗口按钮替代；或在设置中改其他组合键 |
 | 401 / 403 | API Key 错，从托盘菜单 → 设置… 重填 |
 | PDF 进度条卡 0% | 网络问题；查看 PDF 标签页底部日志 |
-| LaTeX 预览中文是方块 | 系统未安装中文字体；ocrmath 自动探测 Microsoft YaHei / SimHei / Noto Sans CJK 等，请确保至少装了一个 |
+| LaTeX 预览空白 | 首次需联网下载 MathJax (~1MB) 至 `%APPDATA%\ocrmath\mathjax\`；如长时间空白请检查网络代理 |
 | 多显示器截图错位 | 已按 `QGuiApplication.screens()` 多屏拼接，仍有问题请提 issue |
 
 ## 隐私说明
@@ -172,7 +172,7 @@ python test_pdf_api.py path\to\small.pdf
 
 - [Mathpix](https://mathpix.com/) — 提供出色的 OCR API
 - [PyQt6](https://pypi.org/project/PyQt6/)
-- [matplotlib mathtext](https://matplotlib.org/stable/users/explain/text/mathtext.html)
+- [MathJax](https://www.mathjax.org/) — 矢量公式渲染
 - [keyboard](https://github.com/boppreh/keyboard)
 - [Inno Setup](https://jrsoftware.org/isinfo.php)
 

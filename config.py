@@ -5,23 +5,45 @@ current user account. Falls back to plaintext JSON elsewhere — this app is
 Windows-first, the fallback is just to keep dev tools usable on other OSes.
 
 Stored fields:
-    app_id, app_key (required), hotkey (optional, default 'ctrl+alt+m')
+    app_id, app_key (required), hotkey (optional),
+    image_count, pdf_page_count, image_price_usd, pdf_price_usd,
+    webdav_url, webdav_user, webdav_password, webdav_path,
+    webdav_auto_sync, last_synced_at
 """
 from __future__ import annotations
 
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 from typing import TypedDict
 
 DEFAULT_HOTKEY = "ctrl+alt+m"
+DEFAULT_IMAGE_PRICE = 0.002
+DEFAULT_PDF_PRICE = 0.005
+DEFAULT_WEBDAV_PATH = "/ocrmath/sync.json"
+
+# Guards read-modify-write cycles for counter bumps and sync writes.
+_LOCK = threading.RLock()
 
 
 class Settings(TypedDict, total=False):
     app_id: str
     app_key: str
     hotkey: str
+    image_count: int
+    pdf_page_count: int
+    image_price_usd: float
+    pdf_price_usd: float
+    webdav_url: str
+    webdav_user: str
+    webdav_password: str
+    webdav_path: str
+    webdav_sync_interval: int      # minutes; 0 = no periodic timer
+    cache_retention_days: int      # 0 = no auto-purge
+    usage_backfilled: bool         # one-shot migration guard
+    last_synced_at: float
 
 
 def _config_path() -> Path:
@@ -59,6 +81,14 @@ def _read_blob() -> bytes | None:
     return raw
 
 
+_STR_KEYS = ("app_id", "app_key", "hotkey",
+             "webdav_url", "webdav_user", "webdav_password", "webdav_path")
+_INT_KEYS = ("image_count", "pdf_page_count",
+             "webdav_sync_interval", "cache_retention_days")
+_FLOAT_KEYS = ("image_price_usd", "pdf_price_usd", "last_synced_at")
+_BOOL_KEYS: tuple[str, ...] = ("usage_backfilled",)
+
+
 def load_all() -> Settings:
     """Return everything stored, or {} if no config / corrupt."""
     blob = _read_blob()
@@ -71,8 +101,17 @@ def load_all() -> Settings:
     if not isinstance(data, dict):
         return {}
     out: Settings = {}
-    for k in ("app_id", "app_key", "hotkey"):
+    for k in _STR_KEYS:
         if k in data and isinstance(data[k], str):
+            out[k] = data[k]  # type: ignore[literal-required]
+    for k in _INT_KEYS:
+        if k in data and isinstance(data[k], int) and not isinstance(data[k], bool):
+            out[k] = data[k]  # type: ignore[literal-required]
+    for k in _FLOAT_KEYS:
+        if k in data and isinstance(data[k], (int, float)) and not isinstance(data[k], bool):
+            out[k] = float(data[k])  # type: ignore[literal-required]
+    for k in _BOOL_KEYS:
+        if k in data and isinstance(data[k], bool):
             out[k] = data[k]  # type: ignore[literal-required]
     return out
 
@@ -92,10 +131,11 @@ def load() -> dict | None:
 
 def save(app_id: str, app_key: str) -> None:
     """Backward-compat: preserves any existing hotkey."""
-    cur = load_all()
-    cur["app_id"] = app_id
-    cur["app_key"] = app_key
-    save_all(cur)
+    with _LOCK:
+        cur = load_all()
+        cur["app_id"] = app_id
+        cur["app_key"] = app_key
+        save_all(cur)
 
 
 def get_hotkey() -> str:
@@ -103,14 +143,147 @@ def get_hotkey() -> str:
 
 
 def set_hotkey(hotkey: str) -> None:
-    cur = load_all()
-    cur["hotkey"] = hotkey
-    save_all(cur)
+    with _LOCK:
+        cur = load_all()
+        cur["hotkey"] = hotkey
+        save_all(cur)
 
 
 def clear() -> None:
     if CONFIG_PATH.exists():
         CONFIG_PATH.unlink()
+
+
+# ---- prices ----------------------------------------------------------------
+
+def get_image_price() -> float:
+    return float(load_all().get("image_price_usd", DEFAULT_IMAGE_PRICE))
+
+
+def get_pdf_price() -> float:
+    return float(load_all().get("pdf_price_usd", DEFAULT_PDF_PRICE))
+
+
+def set_prices(image_usd: float, pdf_usd: float) -> None:
+    with _LOCK:
+        cur = load_all()
+        cur["image_price_usd"] = float(image_usd)
+        cur["pdf_price_usd"] = float(pdf_usd)
+        save_all(cur)
+
+
+# ---- counters --------------------------------------------------------------
+
+def get_counters() -> tuple[int, int]:
+    s = load_all()
+    return int(s.get("image_count", 0) or 0), int(s.get("pdf_page_count", 0) or 0)
+
+
+def bump_image_count(n: int = 1) -> None:
+    with _LOCK:
+        cur = load_all()
+        cur["image_count"] = int(cur.get("image_count", 0) or 0) + int(n)
+        save_all(cur)
+
+
+def bump_pdf_pages(n: int) -> None:
+    if n <= 0:
+        return
+    with _LOCK:
+        cur = load_all()
+        cur["pdf_page_count"] = int(cur.get("pdf_page_count", 0) or 0) + int(n)
+        save_all(cur)
+
+
+# ---- webdav ----------------------------------------------------------------
+
+def get_webdav() -> dict:
+    s = load_all()
+    return {
+        "url": s.get("webdav_url", "") or "",
+        "user": s.get("webdav_user", "") or "",
+        "password": s.get("webdav_password", "") or "",
+        "path": s.get("webdav_path", "") or DEFAULT_WEBDAV_PATH,
+        "interval": int(s.get("webdav_sync_interval", 0) or 0),
+    }
+
+
+def set_webdav(url: str, user: str, password: str, path: str,
+               sync_interval: int) -> None:
+    with _LOCK:
+        cur = load_all()
+        cur["webdav_url"] = url
+        cur["webdav_user"] = user
+        cur["webdav_password"] = password
+        cur["webdav_path"] = path or DEFAULT_WEBDAV_PATH
+        cur["webdav_sync_interval"] = max(0, int(sync_interval))
+        save_all(cur)
+
+
+def get_cache_retention() -> int:
+    """Return the cache retention in days. 0 = disabled (no auto-purge)."""
+    return int(load_all().get("cache_retention_days", 0) or 0)
+
+
+def set_cache_retention(days: int) -> None:
+    with _LOCK:
+        cur = load_all()
+        cur["cache_retention_days"] = max(0, int(days))
+        save_all(cur)
+
+
+def is_usage_backfilled() -> bool:
+    return bool(load_all().get("usage_backfilled", False))
+
+
+def mark_usage_backfilled() -> None:
+    with _LOCK:
+        cur = load_all()
+        cur["usage_backfilled"] = True
+        save_all(cur)
+
+
+def get_last_synced() -> float:
+    return float(load_all().get("last_synced_at", 0.0) or 0.0)
+
+
+def set_last_synced(ts: float) -> None:
+    with _LOCK:
+        cur = load_all()
+        cur["last_synced_at"] = float(ts)
+        save_all(cur)
+
+
+# ---- sync payload ----------------------------------------------------------
+
+_SYNCABLE_KEYS = ("app_id", "app_key",
+                  "image_count", "pdf_page_count",
+                  "image_price_usd", "pdf_price_usd")
+
+
+def get_syncable_payload() -> dict:
+    """Fields that travel through WebDAV. Excludes hotkey + webdav creds."""
+    s = load_all()
+    out: dict = {}
+    for k in _SYNCABLE_KEYS:
+        if k in s:
+            out[k] = s[k]
+    out.setdefault("image_count", 0)
+    out.setdefault("pdf_page_count", 0)
+    out.setdefault("image_price_usd", DEFAULT_IMAGE_PRICE)
+    out.setdefault("pdf_price_usd", DEFAULT_PDF_PRICE)
+    return out
+
+
+def apply_synced_payload(merged: dict, synced_at: float) -> None:
+    """Persist a merged sync result and stamp last_synced_at."""
+    with _LOCK:
+        cur = load_all()
+        for k in _SYNCABLE_KEYS:
+            if k in merged:
+                cur[k] = merged[k]  # type: ignore[literal-required]
+        cur["last_synced_at"] = float(synced_at)
+        save_all(cur)
 
 
 # ---- hotkey format conversion ---------------------------------------------

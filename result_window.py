@@ -4,13 +4,13 @@ from __future__ import annotations
 from typing import Callable
 
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QFont, QGuiApplication, QPixmap
+from PyQt6.QtGui import QFont, QGuiApplication
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPlainTextEdit,
     QPushButton, QSizePolicy,
 )
 
-from latex_preview import LatexRenderWorker
+from mathjax_view import MathJaxView, WEBENGINE_AVAILABLE
 from styles import ACCENT
 
 
@@ -35,12 +35,11 @@ class ResultWindow(QWidget):
         self.setWindowTitle("识别结果 - ocrmath")
         self.setMinimumWidth(580)
         self._on_recapture = on_recapture
-        self._render_worker: LatexRenderWorker | None = None
         self._build_ui()
 
     def _build_ui(self) -> None:
         # ---- header (cache badge + meta) ----
-        self.cache_badge = QLabel("♻ 已缓存 · 节省 $0.002")
+        self.cache_badge = QLabel("♻ 已缓存")
         self.cache_badge.setStyleSheet(
             f"background:#fff7ed; color:{ACCENT}; "
             f"border:1px solid #ffd9b3; border-radius:10px;"
@@ -62,15 +61,22 @@ class ResultWindow(QWidget):
         self.warn.hide()
 
         # ---- preview area ----
-        self.preview_label = QLabel()
-        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview_label.setMinimumHeight(72)
-        self.preview_label.setStyleSheet(
-            "background:white; border:1px solid #e2e2e2;"
-            "border-radius:6px; padding:10px;"
-        )
-        self.preview_label.setText("渲染中…")
-        self.preview_label.setProperty("role", "muted")
+        if WEBENGINE_AVAILABLE:
+            self.preview = MathJaxView()
+            self.preview.setStyleSheet(
+                "border:1px solid #e2e2e2; border-radius:6px; background:white;")
+            self._preview_is_web = True
+        else:
+            self.preview = QLabel(
+                "未安装 PyQt6-WebEngine，无法渲染公式预览。\n"
+                "请运行: pip install PyQt6-WebEngine")
+            self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.preview.setMinimumHeight(72)
+            self.preview.setStyleSheet(
+                "background:white; border:1px solid #e2e2e2;"
+                "border-radius:6px; padding:10px;")
+            self.preview.setProperty("role", "muted")
+            self._preview_is_web = False
 
         # ---- text outputs ----
         mono = QFont("Consolas")
@@ -107,7 +113,7 @@ class ResultWindow(QWidget):
         layout.setContentsMargins(16, 14, 16, 14)
         layout.addLayout(header)
         layout.addWidget(self.warn)
-        layout.addWidget(self.preview_label)
+        layout.addWidget(self.preview)
 
         layout.addWidget(_section("行内 LaTeX  $...$", self.inline_edit, copy_inline))
         layout.addWidget(_section("独立 LaTeX  $$...$$", self.display_edit, copy_display))
@@ -161,7 +167,7 @@ class ResultWindow(QWidget):
 
         if confidence is not None and confidence < 0.5:
             self.warn.setText(
-                f"⚠ 置信度较低 ({confidence * 100:.0f}%)。建议放大或重新截取更清晰的区域。")
+                f"⚠ 置信度 {confidence * 100:.0f}%,建议截取更清晰的区域。")
             self.warn.show()
         else:
             self.warn.hide()
@@ -178,52 +184,31 @@ class ResultWindow(QWidget):
     # ---- preview rendering ------------------------------------------------
 
     def _kick_preview(self, *, latex: str, text: str) -> None:
-        # Cancel any in-flight render
-        if self._render_worker is not None and self._render_worker.isRunning():
-            self._render_worker.requestInterruption()
-            self._render_worker.wait(50)
-
         # Decide what to render:
-        # - text contains $-delimited math regions → render Mathpix Markdown (mixed mode)
-        # - text is pure prose (no $) → no preview, the textarea below shows it already
-        # - text empty but latex_styled present → render latex_styled as pure math
+        # - text contains $-delimited math regions → render Mathpix Markdown
+        # - text empty but latex_styled present → render latex_styled as math
+        # - pure prose / empty → show a hint
         has_math_in_text = bool(text) and ("$" in text)
         if has_math_in_text:
             content, is_math = text, False
         elif latex:
             content, is_math = latex, True
         elif text:
-            # Pure text without math — preview adds no value, just show a hint
-            self.preview_label.setPixmap(QPixmap())
-            self.preview_label.setText("(纯文本无需预览，直接在下方复制)")
+            self._set_preview_message("(纯文本无需预览，直接在下方复制)")
             return
         else:
-            self.preview_label.setPixmap(QPixmap())
-            self.preview_label.setText("(空结果)")
+            self._set_preview_message("(空结果)")
             return
 
-        self.preview_label.setPixmap(QPixmap())
-        self.preview_label.setText("渲染中…")
+        if self._preview_is_web:
+            self.preview.set_content(content, is_math=is_math)
+        # else: QLabel fallback already shows the WebEngine-missing message
 
-        self._render_worker = LatexRenderWorker(content, is_math=is_math)
-        self._render_worker.finished_ok.connect(self._on_preview_ok)
-        self._render_worker.failed.connect(self._on_preview_failed)
-        self._render_worker.start()
-
-    def _on_preview_ok(self, png: bytes) -> None:
-        pix = QPixmap()
-        pix.loadFromData(png, "PNG")
-        # Cap rendered preview to a sensible size
-        if pix.width() > 600:
-            pix = pix.scaledToWidth(
-                600, Qt.TransformationMode.SmoothTransformation)
-        self.preview_label.setText("")
-        self.preview_label.setPixmap(pix)
-
-    def _on_preview_failed(self, msg: str) -> None:
-        self.preview_label.setPixmap(QPixmap())
-        self.preview_label.setText(
-            "⚠ 该公式包含 mathtext 不支持的语法，仅展示源码")
+    def _set_preview_message(self, msg: str) -> None:
+        if self._preview_is_web:
+            self.preview.show_message(msg)
+        else:
+            self.preview.setText(msg)
 
     # ---- internal ----------------------------------------------------------
 

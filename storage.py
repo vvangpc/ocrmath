@@ -30,6 +30,15 @@ CREATE TABLE IF NOT EXISTS recognitions (
     raw_json      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_created ON recognitions(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS usage (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at  REAL    NOT NULL,
+    kind        TEXT    NOT NULL,    -- 'image' or 'pdf'
+    count       INTEGER NOT NULL,    -- 1 for image, page_count for PDF
+    cost_usd    REAL    NOT NULL     -- frozen at event time
+);
+CREATE INDEX IF NOT EXISTS idx_usage_created ON usage(created_at);
 """
 
 
@@ -197,6 +206,104 @@ class Storage:
             self._png_path(sha).unlink(missing_ok=True)
         except Exception:
             pass
+
+    # ---- usage events ------------------------------------------------------
+
+    def log_usage(self, kind: str, count: int, unit_price_usd: float) -> None:
+        """Record one billable event (image OCR call or PDF conversion)."""
+        if count <= 0:
+            return
+        cost = float(count) * float(unit_price_usd)
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO usage (created_at, kind, count, cost_usd) "
+                "VALUES (?, ?, ?, ?)",
+                (time.time(), kind, int(count), cost),
+            )
+            self._conn.commit()
+
+    def usage_summary(self, since_ts: float) -> dict[str, Any]:
+        """Aggregate usage events on/after `since_ts`. Returns:
+        {'image_count': N, 'pdf_pages': M, 'total_cost': X}"""
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT kind, "
+                "       COALESCE(SUM(count), 0) AS c, "
+                "       COALESCE(SUM(cost_usd), 0) AS s "
+                "FROM usage WHERE created_at >= ? GROUP BY kind",
+                (since_ts,),
+            )
+            rows = cur.fetchall()
+        out = {"image_count": 0, "pdf_pages": 0, "total_cost": 0.0}
+        for r in rows:
+            kind = r["kind"]
+            if kind == "image":
+                out["image_count"] = int(r["c"] or 0)
+            elif kind == "pdf":
+                out["pdf_pages"] = int(r["c"] or 0)
+            out["total_cost"] += float(r["s"] or 0.0)
+        return out
+
+    def backfill_image_usage(self, unit_price_usd: float) -> int:
+        """One-shot migration: populate `usage` from existing recognitions.
+
+        For users who recognized images before the `usage` table existed.
+        Each recognition row → one image event with the given unit price
+        (we have to assume the current price; the historical one is unknown).
+        Caller is responsible for guarding against double-runs (use
+        `config.usage_backfilled` flag)."""
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT created_at FROM recognitions ORDER BY created_at")
+            timestamps = [r["created_at"] for r in cur.fetchall()]
+            if not timestamps:
+                return 0
+            cost = float(unit_price_usd)
+            self._conn.executemany(
+                "INSERT INTO usage (created_at, kind, count, cost_usd) "
+                "VALUES (?, 'image', 1, ?)",
+                [(ts, cost) for ts in timestamps],
+            )
+            self._conn.commit()
+            return len(timestamps)
+
+    def purge_older_than(self, days: int) -> int:
+        """Delete recognitions older than `days` days, plus their PNG files.
+        Returns the number of recognitions deleted."""
+        if days <= 0:
+            return 0
+        cutoff = time.time() - days * 86400
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT image_sha256 FROM recognitions WHERE created_at < ?",
+                (cutoff,),
+            )
+            shas = [r["image_sha256"] for r in cur.fetchall()]
+            if shas:
+                self._conn.execute(
+                    "DELETE FROM recognitions WHERE created_at < ?",
+                    (cutoff,),
+                )
+                self._conn.commit()
+        for sha in shas:
+            try:
+                self._png_path(sha).unlink(missing_ok=True)
+            except Exception:
+                pass
+        return len(shas)
+
+    def purge_old_usage(self, days: int) -> int:
+        """Drop usage events older than `days` days. Returns count deleted."""
+        if days <= 0:
+            return 0
+        cutoff = time.time() - days * 86400
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM usage WHERE created_at < ?", (cutoff,))
+            self._conn.commit()
+            return cur.rowcount or 0
+
+    # ---- bulk ops ----------------------------------------------------------
 
     def clear_all(self) -> None:
         with self._lock:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import Callable
 
@@ -13,11 +14,8 @@ from PyQt6.QtWidgets import (
     QMessageBox, QComboBox, QGroupBox,
 )
 
+import config
 from pdf_client import PdfOptions, PdfWorker
-
-# Mathpix PAYG list price as of 2026 (https://mathpix.com/pricing/api)
-# 0–1M pages: $0.005/page. After first 1M it drops to $0.0035/page.
-PRICE_PER_PAGE_USD = 0.005
 
 
 def _count_pdf_pages(p: Path) -> int | None:
@@ -33,14 +31,22 @@ def _count_pdf_pages(p: Path) -> int | None:
 
 
 class PdfPanel(QWidget):
-    def __init__(self, get_creds: Callable[[], dict | None], parent=None):
+    def __init__(self, get_creds: Callable[[], dict | None],
+                 on_pages_processed: Callable[[int], None] | None = None,
+                 parent=None):
         super().__init__(parent)
         self._get_creds = get_creds
+        self._on_pages_processed = on_pages_processed
         self._pdf_path: Path | None = None
         self._page_count: int | None = None
         self._worker: PdfWorker | None = None
         self.setAcceptDrops(True)
         self._build_ui()
+
+    def refresh_price_display(self) -> None:
+        """Recompute the cost label after the user changes pricing."""
+        if self._pdf_path:
+            self._set_pdf(self._pdf_path)
 
     # ---- UI ----------------------------------------------------------------
 
@@ -205,10 +211,11 @@ class PdfPanel(QWidget):
         self.out_edit.setText(str(p.parent))
         if self._page_count:
             self.file_info.setText(f"{p.name}  ({self._page_count} 页)")
-            cost = self._page_count * PRICE_PER_PAGE_USD
+            price = config.get_pdf_price()
+            cost = self._page_count * price
             self.cost_label.setText(
                 f"预估成本: ${cost:.3f}  "
-                f"(${PRICE_PER_PAGE_USD:.3f}/页 × {self._page_count})"
+                f"(${price:.3f}/页 × {self._page_count})"
             )
         else:
             self.file_info.setText(f"{p.name}  (页数未知，安装 pypdf 可显示)")
@@ -245,9 +252,9 @@ class PdfPanel(QWidget):
                                 "请先在设置中填入 Mathpix API Key。")
             return
 
-        # Confirm cost for big files (PDF is $0.005/page, threshold = $0.50)
+        # Confirm cost for big files (threshold = 100 pages)
         if self._page_count and self._page_count > 100:
-            est = self._page_count * PRICE_PER_PAGE_USD
+            est = self._page_count * config.get_pdf_price()
             ret = QMessageBox.question(
                 self, "确认转换",
                 f"该 PDF 共 {self._page_count} 页，预估消耗约 ${est:.3f}。继续？")
@@ -299,6 +306,16 @@ class PdfPanel(QWidget):
     def _on_done(self, paths: list) -> None:
         self.status_label.setText(f"完成，共 {len(paths)} 个文件")
         self.progress.setValue(100)
+        if self._page_count:
+            try:
+                config.bump_pdf_pages(self._page_count)
+            except Exception as exc:
+                sys.stderr.write(f"counter bump failed: {exc}\n")
+            if self._on_pages_processed:
+                try:
+                    self._on_pages_processed(self._page_count)
+                except Exception:
+                    pass
         QMessageBox.information(
             self, "完成",
             "转换完成：\n" + "\n".join(str(p) for p in paths))

@@ -12,14 +12,16 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 block_cipher = None
 
-# matplotlib ships fonts and mpl-data that we need at runtime.
 # `keyboard` registers low-level Windows hooks via _winkeyboard module.
+# QtWebEngine ships its own resources/locales that PyInstaller's PyQt6 hook
+# already collects, so we don't list it here explicitly.
 hiddenimports = (
-    collect_submodules("matplotlib")
-    + collect_submodules("keyboard")
+    collect_submodules("keyboard")
+    + collect_submodules("PyQt6.QtWebEngineCore")
+    + collect_submodules("PyQt6.QtWebEngineWidgets")
 )
 
-datas = collect_data_files("matplotlib")
+datas = []
 
 a = Analysis(
     ["main.py"],
