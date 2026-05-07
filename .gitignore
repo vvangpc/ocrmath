@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.venv/
+venv/
+env/
+
+# PyInstaller
+build/
+dist/
+*.manifest
+
+# Inno Setup
+Output/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Project artifacts
+_make_icon.py
+_smoke_*.py
+_test_*.py
+test_*.png
+test_capture.png
+test_latex.png
+
+# Local config / cache (these belong in %APPDATA%)
+config.dat
+ocrmath.db
+cache/
+out/
+
+# Build artifacts not in dist/
+*.spec.bak
