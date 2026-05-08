@@ -4,7 +4,7 @@
 ;   "C:\Users\<user>\AppData\Local\Programs\Inno Setup 6\ISCC.exe" installer.iss
 
 #define AppName        "ocrmath"
-#define AppVersion     "1.0.0"
+#define AppVersion     "1.1.0"
 #define AppPublisher   "vvangpc"
 #define AppURL         "https://github.com/vvangpc/ocrmath"
 #define AppExe         "ocrmath.exe"
