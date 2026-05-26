@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Callable
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import (
     QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -16,6 +16,7 @@ from history_panel import HistoryPanel
 from pdf_panel import PdfPanel
 from storage import Recognition, Storage
 from styles import ACCENT, MUTED
+from ui_icons import icon
 
 
 def _format_synced(ts: float) -> str:
@@ -62,9 +63,10 @@ class MainWindow(QMainWindow):
         self.history_panel = HistoryPanel(storage, on_open=on_open_history)
 
         tabs = QTabWidget()
-        tabs.addTab(self.snip_tab, "  截屏识别  ")
-        tabs.addTab(self.pdf_panel, "  PDF 转换  ")
-        tabs.addTab(self.history_panel, "  历史记录  ")
+        tabs.setIconSize(QSize(18, 18))
+        tabs.addTab(self.snip_tab, icon("snip", ACCENT), "  截屏识别  ")
+        tabs.addTab(self.pdf_panel, icon("pdf", ACCENT), "  PDF 转换  ")
+        tabs.addTab(self.history_panel, icon("history", ACCENT), "  历史记录  ")
         tabs.currentChanged.connect(self._on_tab_changed)
         self._tabs = tabs
 
@@ -107,6 +109,8 @@ class MainWindow(QMainWindow):
             f"font-weight: 600; color: {ACCENT};"
         )
         change_btn = QPushButton("修改…")
+        change_btn.setIcon(icon("settings"))
+        change_btn.setIconSize(QSize(16, 16))
         change_btn.setFixedWidth(80)
         change_btn.clicked.connect(lambda: self._on_open_settings())
 
@@ -117,6 +121,8 @@ class MainWindow(QMainWindow):
 
         snip_btn = QPushButton("立即截屏识别")
         snip_btn.setObjectName("accent")
+        snip_btn.setIcon(icon("snip", "white"))
+        snip_btn.setIconSize(QSize(22, 22))
         snip_btn.setMinimumHeight(48)
         snip_btn.setStyleSheet("font-size: 12pt;")
         snip_btn.clicked.connect(lambda: self._on_snip())
@@ -149,6 +155,8 @@ class MainWindow(QMainWindow):
 
         bottom = QHBoxLayout()
         settings_btn = QPushButton("设置")
+        settings_btn.setIcon(icon("settings"))
+        settings_btn.setIconSize(QSize(16, 16))
         settings_btn.clicked.connect(lambda: self._on_open_settings())
         bottom.addWidget(settings_btn)
         bottom.addStretch(1)
@@ -188,12 +196,16 @@ class MainWindow(QMainWindow):
 
         actions = QHBoxLayout()
         refresh_btn = QPushButton("刷新")
+        refresh_btn.setIcon(icon("refresh"))
+        refresh_btn.setIconSize(QSize(16, 16))
         refresh_btn.setFixedWidth(80)
         refresh_btn.clicked.connect(self.refresh_stats)
         actions.addWidget(refresh_btn)
         actions.addStretch(1)
         sync_btn = QPushButton("立即同步")
         sync_btn.setObjectName("accent")
+        sync_btn.setIcon(icon("sync", "white"))
+        sync_btn.setIconSize(QSize(16, 16))
         sync_btn.setFixedWidth(96)
         sync_btn.clicked.connect(self._handle_sync_clicked)
         self.sync_btn = sync_btn

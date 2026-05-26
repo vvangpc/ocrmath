@@ -6,7 +6,7 @@ import sys
 import traceback
 
 from PyQt6.QtCore import Qt, QObject, QTimer, QEventLoop, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QAction, QIcon, QPainter, QPixmap, QColor, QFont
+from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
     QApplication, QSystemTrayIcon, QMenu, QMessageBox,
 )
@@ -20,32 +20,7 @@ from settings_dialog import SettingsDialog
 from snipper import Snipper
 from storage import Storage, Recognition
 from styles import STYLESHEET, ACCENT
-
-
-def _make_icon(color: str = ACCENT, alpha: int = 255) -> QIcon:
-    """Generate a 'Σ' icon at runtime so we don't ship a binary asset.
-
-    Pass a lighter alpha for the 'busy' frame.
-    """
-    pix = QPixmap(64, 64)
-    pix.fill(Qt.GlobalColor.transparent)
-    p = QPainter(pix)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    fill = QColor(color)
-    fill.setAlpha(alpha)
-    p.setBrush(fill)
-    p.setPen(Qt.PenStyle.NoPen)
-    p.drawRoundedRect(2, 2, 60, 60, 14, 14)
-    text_color = QColor("white")
-    text_color.setAlpha(alpha)
-    p.setPen(text_color)
-    f = QFont()
-    f.setBold(True)
-    f.setPixelSize(40)
-    p.setFont(f)
-    p.drawText(pix.rect(), Qt.AlignmentFlag.AlignCenter, "Σ")
-    p.end()
-    return QIcon(pix)
+from ui_icons import app_icon, icon
 
 
 class HotkeyBridge(QObject):
@@ -57,8 +32,8 @@ class App(QObject):
     def __init__(self, qapp: QApplication):
         super().__init__()
         self.qapp = qapp
-        self.icon = _make_icon(ACCENT, 255)
-        self.icon_busy = _make_icon(ACCENT, 90)  # dim version for blink
+        self.icon = app_icon()
+        self.icon_busy = app_icon(busy=True)
         qapp.setWindowIcon(self.icon)
         qapp.setQuitOnLastWindowClosed(False)
 
@@ -151,22 +126,26 @@ class App(QObject):
         menu = QMenu()
 
         self.act_snip = QAction("截屏识别", self)
+        self.act_snip.setIcon(icon("snip", ACCENT))
         self.act_snip.triggered.connect(self.on_snip)
         menu.addAction(self.act_snip)
 
         act_main = QAction("打开主窗口…", self)
+        act_main.setIcon(icon("open"))
         act_main.triggered.connect(self._show_main)
         menu.addAction(act_main)
 
         menu.addSeparator()
 
         act_settings = QAction("设置…", self)
+        act_settings.setIcon(icon("settings"))
         act_settings.triggered.connect(lambda: self.open_settings())
         menu.addAction(act_settings)
 
         menu.addSeparator()
 
         act_quit = QAction("退出", self)
+        act_quit.setIcon(icon("close"))
         act_quit.triggered.connect(self._quit)
         menu.addAction(act_quit)
 

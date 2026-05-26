@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 from typing import Callable
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QSize, Qt, QTimer
 from PyQt6.QtGui import QPixmap, QImage, QGuiApplication
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
@@ -12,6 +12,8 @@ from PyQt6.QtWidgets import (
 )
 
 from storage import Recognition, Storage
+from styles import ACCENT
+from ui_icons import icon
 
 
 def _fmt_ts(ts: float) -> str:
@@ -73,12 +75,18 @@ class HistoryRow(QWidget):
 
         # Action buttons
         copy_btn = QPushButton("复制 LaTeX")
+        copy_btn.setIcon(icon("copy"))
+        copy_btn.setIconSize(QSize(15, 15))
         copy_btn.setFixedHeight(28)
         copy_btn.clicked.connect(self._copy)
         open_btn = QPushButton("打开")
+        open_btn.setIcon(icon("open"))
+        open_btn.setIconSize(QSize(15, 15))
         open_btn.setFixedHeight(28)
         open_btn.clicked.connect(lambda: on_open(rec))
         del_btn = QPushButton("删除")
+        del_btn.setIcon(icon("trash"))
+        del_btn.setIconSize(QSize(15, 15))
         del_btn.setFixedHeight(28)
         del_btn.clicked.connect(lambda: on_delete(rec))
 
@@ -130,8 +138,12 @@ class HistoryPanel(QWidget):
         self.search_edit.textChanged.connect(lambda _t: self._debounce.start())
 
         refresh_btn = QPushButton("刷新")
+        refresh_btn.setIcon(icon("refresh", ACCENT))
+        refresh_btn.setIconSize(QSize(16, 16))
         refresh_btn.clicked.connect(self.refresh)
         clear_btn = QPushButton("清空缓存")
+        clear_btn.setIcon(icon("trash"))
+        clear_btn.setIconSize(QSize(16, 16))
         clear_btn.clicked.connect(self._clear_all)
 
         self.summary = QLabel("")

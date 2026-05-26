@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtCore import QSize, Qt, QUrl
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QCheckBox,
@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
 
 import config
 from pdf_client import PdfOptions, PdfWorker
+from ui_icons import icon
 
 
 def _count_pdf_pages(p: Path) -> int | None:
@@ -58,6 +59,8 @@ class PdfPanel(QWidget):
         self.drop_label.setMinimumHeight(110)
 
         pick_btn = QPushButton("选择 PDF…")
+        pick_btn.setIcon(icon("pdf"))
+        pick_btn.setIconSize(QSize(16, 16))
         pick_btn.clicked.connect(self._pick_file)
 
         self.file_info = QLabel("尚未选择文件")
@@ -96,6 +99,8 @@ class PdfPanel(QWidget):
         self.out_edit = QLineEdit()
         self.out_edit.setPlaceholderText("默认与所选 PDF 同目录")
         out_browse = QPushButton("浏览…")
+        out_browse.setIcon(icon("folder"))
+        out_browse.setIconSize(QSize(16, 16))
         out_browse.clicked.connect(self._pick_out_dir)
         out_row = QHBoxLayout()
         out_row.addWidget(QLabel("输出目录"))
@@ -122,8 +127,12 @@ class PdfPanel(QWidget):
         # Action row
         self.start_btn = QPushButton("开始转换")
         self.start_btn.setObjectName("accent")
+        self.start_btn.setIcon(icon("play", "white"))
+        self.start_btn.setIconSize(QSize(17, 17))
         self.start_btn.clicked.connect(self._start)
         self.cancel_btn = QPushButton("取消")
+        self.cancel_btn.setIcon(icon("close"))
+        self.cancel_btn.setIconSize(QSize(16, 16))
         self.cancel_btn.clicked.connect(self._cancel)
         self.cancel_btn.setEnabled(False)
         self.cost_label = QLabel("预估成本: —")

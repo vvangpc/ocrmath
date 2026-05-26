@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QKeySequence
 from PyQt6.QtWidgets import (
     QDialog, QFormLayout, QGridLayout, QLabel, QLineEdit, QPushButton,
@@ -13,6 +13,8 @@ from PyQt6.QtWidgets import (
 
 import config
 import webdav
+from styles import ACCENT
+from ui_icons import icon
 
 
 def _format_synced(ts: float) -> str:
@@ -96,6 +98,8 @@ class SettingsDialog(QDialog):
             QKeySequence(config.keyboard_to_qt(self._old_hotkey)))
 
         reset_btn = QPushButton("恢复默认")
+        reset_btn.setIcon(icon("refresh"))
+        reset_btn.setIconSize(QSize(16, 16))
         reset_btn.setFixedWidth(96)
         reset_btn.clicked.connect(self._reset_hotkey)
 
@@ -128,12 +132,18 @@ class SettingsDialog(QDialog):
         self.pdf_price_label.setStyleSheet(mono_style)
 
         image_edit_btn = QPushButton("修改…")
+        image_edit_btn.setIcon(icon("settings"))
+        image_edit_btn.setIconSize(QSize(16, 16))
         image_edit_btn.setFixedWidth(96)
         image_edit_btn.clicked.connect(lambda: self._edit_price("image"))
         pdf_edit_btn = QPushButton("修改…")
+        pdf_edit_btn.setIcon(icon("settings"))
+        pdf_edit_btn.setIconSize(QSize(16, 16))
         pdf_edit_btn.setFixedWidth(96)
         pdf_edit_btn.clicked.connect(lambda: self._edit_price("pdf"))
         price_reset_btn = QPushButton("恢复默认")
+        price_reset_btn.setIcon(icon("refresh"))
+        price_reset_btn.setIconSize(QSize(16, 16))
         price_reset_btn.setFixedWidth(96)
         price_reset_btn.clicked.connect(self._reset_prices)
 
@@ -205,8 +215,12 @@ class SettingsDialog(QDialog):
         wd_form.addRow("同步间隔", interval_row)
 
         self.wd_test_btn = QPushButton("测试连接")
+        self.wd_test_btn.setIcon(icon("sync"))
+        self.wd_test_btn.setIconSize(QSize(16, 16))
         self.wd_test_btn.clicked.connect(self._test_webdav)
         self.wd_sync_btn = QPushButton("立即同步")
+        self.wd_sync_btn.setIcon(icon("sync", ACCENT))
+        self.wd_sync_btn.setIconSize(QSize(16, 16))
         self.wd_sync_btn.clicked.connect(self._sync_webdav)
         self.wd_status = QLabel(_format_synced(config.get_last_synced()))
         self.wd_status.setProperty("role", "muted")
@@ -235,6 +249,8 @@ class SettingsDialog(QDialog):
         cache_hint = QLabel("启动时自动清理超过此天数的截图历史和用量记录。")
         cache_hint.setProperty("role", "muted")
         cache_now_btn = QPushButton("立即清理")
+        cache_now_btn.setIcon(icon("trash"))
+        cache_now_btn.setIconSize(QSize(16, 16))
         cache_now_btn.setFixedWidth(96)
         cache_now_btn.clicked.connect(self._purge_cache_now)
         self.cache_status = QLabel("")
@@ -259,13 +275,19 @@ class SettingsDialog(QDialog):
         # ---- Buttons ----
         save_btn = QPushButton("保存")
         save_btn.setObjectName("accent")
+        save_btn.setIcon(icon("play", "white"))
+        save_btn.setIconSize(QSize(16, 16))
         save_btn.setDefault(True)
         save_btn.clicked.connect(self._save)
 
         cancel_btn = QPushButton("取消")
+        cancel_btn.setIcon(icon("close"))
+        cancel_btn.setIconSize(QSize(16, 16))
         cancel_btn.clicked.connect(self.reject)
 
         clear_btn = QPushButton("清除已存凭证")
+        clear_btn.setIcon(icon("trash"))
+        clear_btn.setIconSize(QSize(16, 16))
         clear_btn.clicked.connect(self._clear)
 
         btn_row = QHBoxLayout()

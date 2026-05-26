@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QSize, Qt, QTimer
 from PyQt6.QtGui import QFont, QGuiApplication
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPlainTextEdit,
@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
 
 from mathjax_view import MathJaxView, WEBENGINE_AVAILABLE
 from styles import ACCENT
+from ui_icons import icon
 
 
 def _strip_outer_dollars(s: str) -> str:
@@ -98,12 +99,18 @@ class ResultWindow(QWidget):
         self.text_edit.setMaximumHeight(120)
 
         copy_inline = QPushButton("复制")
+        copy_inline.setIcon(icon("copy"))
+        copy_inline.setIconSize(QSize(16, 16))
         copy_inline.clicked.connect(
             lambda: self._copy(self.inline_edit.toPlainText()))
         copy_display = QPushButton("复制")
+        copy_display.setIcon(icon("copy"))
+        copy_display.setIconSize(QSize(16, 16))
         copy_display.clicked.connect(
             lambda: self._copy(self.display_edit.toPlainText()))
         copy_text = QPushButton("复制")
+        copy_text.setIcon(icon("copy"))
+        copy_text.setIconSize(QSize(16, 16))
         copy_text.clicked.connect(
             lambda: self._copy(self.text_edit.toPlainText()))
 
@@ -126,10 +133,14 @@ class ResultWindow(QWidget):
 
         if self._on_recapture is not None:
             recap = QPushButton("重新截图")
+            recap.setIcon(icon("snip"))
+            recap.setIconSize(QSize(16, 16))
             recap.clicked.connect(self._on_recapture)
             bottom.addWidget(recap)
 
         close = QPushButton("关闭")
+        close.setIcon(icon("close"))
+        close.setIconSize(QSize(16, 16))
         close.clicked.connect(self.close)
         bottom.addWidget(close)
         layout.addLayout(bottom)
