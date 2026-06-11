@@ -1,0 +1,70 @@
+name: Build & Release
+
+# Build the Windows installer on every tag push (vX.Y.Z) and publish it as a
+# GitHub Release. Also runnable manually (workflow_dispatch) to produce an
+# installer artifact without cutting a release.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to create the Release and upload assets
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build app with PyInstaller
+        run: python -m PyInstaller build.spec --clean --noconfirm
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Fetch unofficial ChineseSimplified language file
+        # installer.iss references compiler:Languages\ChineseSimplified.isl,
+        # which ships as an *unofficial* Inno Setup translation (not in the
+        # default install). Drop it into the compiler's Languages folder.
+        shell: pwsh
+        run: |
+          $dest = "C:\Program Files (x86)\Inno Setup 6\Languages\ChineseSimplified.isl"
+          $url  = "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Unofficial/ChineseSimplified.isl"
+          Invoke-WebRequest -Uri $url -OutFile $dest
+          if (-not (Test-Path $dest)) { throw "ChineseSimplified.isl download failed" }
+
+      - name: Compile installer with Inno Setup
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ocrmath-installer
+          path: dist/installer/*.exe
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/installer/*.exe
+          generate_release_notes: true
+          fail_on_unmatched_files: true
