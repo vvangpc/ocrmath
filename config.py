@@ -57,28 +57,65 @@ def _config_path() -> Path:
 CONFIG_PATH = _config_path()
 
 
+# Cache of the decrypted blob, keyed by (st_mtime_ns, st_size) — load_all()
+# is called several times per UI refresh and each call would otherwise
+# re-read the file and round-trip DPAPI. A single tuple global keeps the
+# (key, data) pair consistent for lock-free readers on other threads.
+_BLOB_CACHE: tuple[tuple[int, int], bytes] | None = None
+
+
+def _stat_key() -> tuple[int, int] | None:
+    try:
+        st = CONFIG_PATH.stat()
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
 def _write_blob(payload: bytes) -> None:
+    global _BLOB_CACHE
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     if sys.platform == "win32":
         import win32crypt
         blob = win32crypt.CryptProtectData(payload, "ocrmath", None, None, None, 0)
-        CONFIG_PATH.write_bytes(blob)
     else:
-        CONFIG_PATH.write_bytes(payload)
+        blob = payload
+    # Atomic replace so a crash mid-write can't corrupt the stored credentials.
+    tmp = CONFIG_PATH.with_suffix(".tmp")
+    tmp.write_bytes(blob)
+    os.replace(tmp, CONFIG_PATH)
+    key = _stat_key()
+    _BLOB_CACHE = (key, payload) if key is not None else None
 
 
 def _read_blob() -> bytes | None:
-    if not CONFIG_PATH.exists():
+    global _BLOB_CACHE
+    key = _stat_key()
+    if key is None:
         return None
+    cached = _BLOB_CACHE
+    if cached is not None and cached[0] == key:
+        return cached[1]
     raw = CONFIG_PATH.read_bytes()
     if sys.platform == "win32":
         import win32crypt
         try:
             _, plain = win32crypt.CryptUnprotectData(raw, None, None, None, 0)
-            return plain
         except Exception:
+            # Undecryptable (different user account / machine). Preserve the
+            # blob for diagnostics instead of letting the next save clobber it.
+            try:
+                os.replace(CONFIG_PATH, CONFIG_PATH.with_suffix(".corrupt"))
+                sys.stderr.write(
+                    f"config: cannot decrypt {CONFIG_PATH}, "
+                    f"moved to {CONFIG_PATH.with_suffix('.corrupt')}\n")
+            except Exception:
+                pass
             return None
-    return raw
+    else:
+        plain = raw
+    _BLOB_CACHE = (key, plain)
+    return plain
 
 
 _STR_KEYS = ("app_id", "app_key", "hotkey",

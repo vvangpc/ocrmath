@@ -22,7 +22,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import requests
 from requests.auth import HTTPBasicAuth
-from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
 import config
 
@@ -197,9 +197,11 @@ def sync_once() -> float:
             merged = dict(local_data)
 
         now = time.time()
-        config.apply_synced_payload(merged, now)
+        # Upload first: persisting last_synced_at before a failed PUT would
+        # show a bogus "synced" timestamp and skew last-write-wins merges.
         upload(wd["url"], wd["user"], wd["password"], wd["path"],
                {"version": 1, "synced_at": now, "data": merged})
+        config.apply_synced_payload(merged, now)
         return now
     finally:
         _SYNC_LOCK.release()
@@ -208,9 +210,23 @@ def sync_once() -> float:
 # ---- Qt worker -------------------------------------------------------------
 
 
+# Keeps running workers alive even if their owner (e.g. a closed settings
+# dialog) drops the last reference — a QThread garbage-collected while its
+# thread is still running aborts the whole app.
+_ACTIVE_WORKERS: set["WebDavSyncWorker"] = set()
+
+
 class WebDavSyncWorker(QThread):
     finished_ok = pyqtSignal(float)   # synced_at epoch
     failed = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        _ACTIVE_WORKERS.add(self)
+        # Queued so the discard (possibly the last reference) runs on the
+        # main thread after the worker thread has fully wound down.
+        self.finished.connect(lambda: _ACTIVE_WORKERS.discard(self),
+                              Qt.ConnectionType.QueuedConnection)
 
     def run(self) -> None:
         try:

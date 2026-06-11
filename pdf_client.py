@@ -83,15 +83,15 @@ def get_status(pdf_id: str, app_id: str, app_key: str,
 def download(pdf_id: str, ext: str, dest: Path, app_id: str, app_key: str,
              timeout: int = 120) -> None:
     """ext is one of: mmd, docx, tex.zip, html, lines.json, pdf"""
-    resp = requests.get(f"{API_BASE}/{pdf_id}.{ext}",
-                        headers=_headers(app_id, app_key),
-                        timeout=timeout, stream=True)
-    resp.raise_for_status()
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    with open(dest, "wb") as fh:
-        for chunk in resp.iter_content(chunk_size=64 * 1024):
-            if chunk:
-                fh.write(chunk)
+    with requests.get(f"{API_BASE}/{pdf_id}.{ext}",
+                      headers=_headers(app_id, app_key),
+                      timeout=timeout, stream=True) as resp:
+        resp.raise_for_status()
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with open(dest, "wb") as fh:
+            for chunk in resp.iter_content(chunk_size=64 * 1024):
+                if chunk:
+                    fh.write(chunk)
 
 
 class PdfWorker(QThread):
@@ -99,7 +99,7 @@ class PdfWorker(QThread):
 
     progress = pyqtSignal(int, str)         # percent, status text
     log = pyqtSignal(str)                    # log line
-    finished_ok = pyqtSignal(list)           # list[Path] of saved files
+    finished_ok = pyqtSignal(list, int)      # saved files, pages processed (0 = unknown)
     failed = pyqtSignal(str)
 
     POLL_INTERVAL_S = 2.0
@@ -138,6 +138,7 @@ class PdfWorker(QThread):
 
         deadline = time.monotonic() + self.POLL_TIMEOUT_S
         last_status = ""
+        num_pages = 0  # actual pages processed, per the status endpoint
         while True:
             if self._cancel:
                 self.failed.emit("Cancelled by user")
@@ -155,6 +156,12 @@ class PdfWorker(QThread):
             pct = int(status.get("percent_done") or 0)
             done = status.get("num_pages_completed")
             total = status.get("num_pages")
+            # Pages completed is the billable quantity (honors page_ranges);
+            # fall back to the document total if it was never reported.
+            if done:
+                num_pages = int(done)
+            elif total and not num_pages:
+                num_pages = int(total)
             text = f"{st}: {done}/{total} pages" if total else st
             if text != last_status:
                 self.progress.emit(pct, text)
@@ -181,4 +188,4 @@ class PdfWorker(QThread):
             saved.append(dest)
 
         self.progress.emit(100, "Done")
-        self.finished_ok.emit(saved)
+        self.finished_ok.emit(saved, num_pages)

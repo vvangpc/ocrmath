@@ -212,6 +212,7 @@ if WEBENGINE_AVAILABLE:
                                QSizePolicy.Policy.Preferred)
             self._page_loaded = False
             self._pending: tuple[str, bool] | None = None
+            self._pending_msg: str | None = None
             self._downloader: MathJaxDownloader | None = None
             self.loadFinished.connect(self._on_load_finished)
             self._render_or_download()
@@ -234,7 +235,7 @@ if WEBENGINE_AVAILABLE:
 
         def show_message(self, msg: str) -> None:
             if not self._page_loaded:
-                self._pending_msg = msg  # type: ignore[attr-defined]
+                self._pending_msg = msg
                 return
             self.page().runJavaScript(
                 "showMessage({});".format(json.dumps(msg)))
@@ -292,7 +293,12 @@ if WEBENGINE_AVAILABLE:
             if self._pending is not None:
                 text, is_math = self._pending
                 self._pending = None
+                self._pending_msg = None
                 self.set_content(text, is_math)
+            elif self._pending_msg is not None:
+                msg = self._pending_msg
+                self._pending_msg = None
+                self.show_message(msg)
 
 else:  # pragma: no cover
 

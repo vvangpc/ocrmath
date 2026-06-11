@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import sys
 import traceback
 
@@ -41,6 +42,7 @@ class App(QObject):
         self._pending_sha: str | None = None
         self._pending_png: bytes | None = None
         self._sync_worker: webdav.WebDavSyncWorker | None = None
+        self._exit_sync_worker: webdav.WebDavSyncWorker | None = None
 
         self._periodic_timer = QTimer(self)
         self._periodic_timer.setSingleShot(False)
@@ -393,7 +395,11 @@ class App(QObject):
         finish_timer.setSingleShot(True)
         finish_timer.timeout.connect(loop.quit)
 
+        # Keep a reference on self: if the sync outlives the timeout, letting
+        # the QThread be garbage-collected while still running aborts the app
+        # ("QThread: Destroyed while thread is still running").
         worker = webdav.WebDavSyncWorker()
+        self._exit_sync_worker = worker
         worker.finished_ok.connect(lambda *_a: loop.quit())
         worker.failed.connect(
             lambda msg: (sys.stderr.write(f"exit sync failed: {msg}\n"),
@@ -443,7 +449,10 @@ class App(QObject):
 
 def _excepthook(exc_type, exc, tb) -> None:
     text = "".join(traceback.format_exception(exc_type, exc, tb))
-    sys.stderr.write(text)
+    try:
+        sys.stderr.write(text)
+    except Exception:
+        pass
     try:
         QMessageBox.critical(None, "未捕获错误", text[-2000:])
     except Exception:
@@ -451,6 +460,12 @@ def _excepthook(exc_type, exc, tb) -> None:
 
 
 def main() -> int:
+    # Windowed (console=False) PyInstaller builds run with the std streams set
+    # to None; every sys.stderr.write() in the codebase would AttributeError.
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
     sys.excepthook = _excepthook
     # QtWebEngine requires this before QApplication is constructed.
     QApplication.setAttribute(

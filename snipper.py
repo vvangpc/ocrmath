@@ -52,13 +52,18 @@ class Snipper(QWidget):
             full = full.united(s.geometry())
         self._virtual_origin = full.topLeft()
 
-        # Grab each screen's pixmap and stitch into one big QPixmap
-        canvas = QPixmap(full.size())
+        # Grab each screen's pixmap and stitch into one big QPixmap.
+        # grabWindow() returns physical pixels (devicePixelRatio set), so the
+        # canvas gets the max DPR too — otherwise the capture is downscaled to
+        # logical resolution on scaled displays, hurting OCR accuracy.
+        dpr = max(s.devicePixelRatio() for s in screens)
+        canvas = QPixmap(int(full.width() * dpr), int(full.height() * dpr))
+        canvas.setDevicePixelRatio(dpr)
         canvas.fill(QColor(0, 0, 0))
         painter = QPainter(canvas)
         for s in screens:
             geom = s.geometry()
-            shot = s.grabWindow(0)  # full screen
+            shot = s.grabWindow(0)  # full screen, physical pixels
             painter.drawPixmap(geom.topLeft() - full.topLeft(), shot)
         painter.end()
         self._screenshot = canvas
@@ -82,8 +87,9 @@ class Snipper(QWidget):
         # Highlight selection rect
         if self._origin and self._current:
             sel = QRect(self._origin, self._current).normalized()
-            # Re-draw original pixels inside selection to undo the dim
-            p.drawPixmap(sel, self._screenshot, sel)
+            # Re-draw original pixels inside selection to undo the dim.
+            # The source rect is in device pixels, so scale by the DPR.
+            p.drawPixmap(sel, self._screenshot, _to_device_rect(sel, self._screenshot))
             pen = QPen(QColor(255, 90, 0), 2)
             p.setPen(pen)
             p.drawRect(sel)
@@ -106,19 +112,33 @@ class Snipper(QWidget):
     def mouseReleaseEvent(self, evt: QMouseEvent) -> None:
         if evt.button() != Qt.MouseButton.LeftButton or not self._origin:
             return
+        if self._screenshot is None:
+            return
         self._current = evt.pos()
         sel = QRect(self._origin, self._current).normalized()
         self.hide()
         if sel.width() < MIN_REGION_SIDE or sel.height() < MIN_REGION_SIDE:
             self.cancelled.emit()
             return
-        cropped = self._screenshot.copy(sel)
+        # copy() takes device-pixel coordinates — crop at full resolution.
+        cropped = self._screenshot.copy(_to_device_rect(sel, self._screenshot))
         self.captured.emit(_pixmap_to_png_bytes(cropped))
 
     def keyPressEvent(self, evt: QKeyEvent) -> None:
         if evt.key() == Qt.Key.Key_Escape:
             self.hide()
             self.cancelled.emit()
+
+
+def _to_device_rect(logical: QRect, pix: QPixmap) -> QRect:
+    """Map a logical-coordinate rect onto `pix`'s device-pixel grid."""
+    dpr = pix.devicePixelRatio()
+    return QRect(
+        round(logical.x() * dpr),
+        round(logical.y() * dpr),
+        round(logical.width() * dpr),
+        round(logical.height() * dpr),
+    )
 
 
 def _pixmap_to_png_bytes(pix: QPixmap) -> bytes:

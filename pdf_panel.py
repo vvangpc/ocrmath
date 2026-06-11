@@ -40,6 +40,7 @@ class PdfPanel(QWidget):
         self._on_pages_processed = on_pages_processed
         self._pdf_path: Path | None = None
         self._page_count: int | None = None
+        self._billing_page_count: int | None = None
         self._worker: PdfWorker | None = None
         self.setAcceptDrops(True)
         self._build_ui()
@@ -269,6 +270,13 @@ class PdfPanel(QWidget):
                 f"该 PDF 共 {self._page_count} 页，预估消耗约 ${est:.3f}。继续？")
             if ret != QMessageBox.StandardButton.Yes:
                 return
+        elif self._page_count is None:
+            ret = QMessageBox.question(
+                self, "页数未知",
+                "无法读取该 PDF 的页数（未安装 pypdf 或文件异常），"
+                "将按 API 实际处理页数计费。继续？")
+            if ret != QMessageBox.StandardButton.Yes:
+                return
 
         page_ranges = None
         if self.range_combo.currentIndex() == 1:
@@ -280,13 +288,21 @@ class PdfPanel(QWidget):
             rm_spaces=self.cb_rm_spaces.isChecked(),
         )
         out_dir = Path(self.out_edit.text().strip() or ".")
-        out_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            QMessageBox.warning(self, "输出目录无效",
+                                f"无法创建输出目录：\n{out_dir}\n\n{exc}")
+            return
 
         self.log_view.clear()
         self.progress.setValue(0)
         self.status_label.setText("启动…")
         self.start_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
+
+        # Snapshot for billing: the user may pick another PDF mid-conversion.
+        self._billing_page_count = self._page_count
 
         self._worker = PdfWorker(
             self._pdf_path, opts, out_dir,
@@ -312,17 +328,20 @@ class PdfPanel(QWidget):
     def _on_log(self, line: str) -> None:
         self.log_view.appendPlainText(line)
 
-    def _on_done(self, paths: list) -> None:
+    def _on_done(self, paths: list, num_pages: int) -> None:
         self.status_label.setText(f"完成，共 {len(paths)} 个文件")
         self.progress.setValue(100)
-        if self._page_count:
+        # Prefer the page count reported by the API (honors page_ranges and
+        # works without pypdf); fall back to the local count snapshot.
+        pages = num_pages or self._billing_page_count or 0
+        if pages:
             try:
-                config.bump_pdf_pages(self._page_count)
+                config.bump_pdf_pages(pages)
             except Exception as exc:
                 sys.stderr.write(f"counter bump failed: {exc}\n")
             if self._on_pages_processed:
                 try:
-                    self._on_pages_processed(self._page_count)
+                    self._on_pages_processed(pages)
                 except Exception:
                     pass
         QMessageBox.information(
