@@ -24,6 +24,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: "pip"
 
       - name: Install dependencies
         run: |
@@ -37,17 +38,8 @@ jobs:
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
 
-      - name: Fetch unofficial ChineseSimplified language file
-        # installer.iss references compiler:Languages\ChineseSimplified.isl,
-        # which ships as an *unofficial* Inno Setup translation (not in the
-        # default install). Drop it into the compiler's Languages folder.
-        shell: pwsh
-        run: |
-          $dest = "C:\Program Files (x86)\Inno Setup 6\Languages\ChineseSimplified.isl"
-          $url  = "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Unofficial/ChineseSimplified.isl"
-          Invoke-WebRequest -Uri $url -OutFile $dest
-          if (-not (Test-Path $dest)) { throw "ChineseSimplified.isl download failed" }
-
+      # ChineseSimplified.isl is vendored at installer/ChineseSimplified.isl
+      # and referenced relative to installer.iss — no download step needed.
       - name: Compile installer with Inno Setup
         shell: pwsh
         run: |

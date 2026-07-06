@@ -37,7 +37,9 @@ MinVersion=10.0.17763
 
 [Languages]
 Name: "english";       MessagesFile: "compiler:Default.isl"
-Name: "chinesesimp";   MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+; Translation vendored in-repo (requires Inno Setup 6.5+): the download URL
+; it used to be fetched from moved once already and broke the build.
+Name: "chinesesimp";   MessagesFile: "installer\ChineseSimplified.isl"
 
 [Tasks]
 Name: "desktopicon";   Description: "{cm:CreateDesktopIcon}";   GroupDescription: "{cm:AdditionalIcons}";   Flags: unchecked

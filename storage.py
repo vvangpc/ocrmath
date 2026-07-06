@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS recognitions (
     is_printed    INTEGER,
     is_handwritten INTEGER,
     request_id    TEXT,
-    raw_json      TEXT
+    raw_json      TEXT,
+    png_size      INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_created ON recognitions(created_at DESC);
 
@@ -76,10 +77,33 @@ class Storage:
             str(self.db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(SCHEMA)
+        self._migrate()
         self._conn.commit()
         self._lock = threading.RLock()
 
     # ---- helpers -----------------------------------------------------------
+
+    def _migrate(self) -> None:
+        """Upgrade databases created before the png_size column existed."""
+        cols = {r[1] for r in self._conn.execute(
+            "PRAGMA table_info(recognitions)")}
+        if "png_size" in cols:
+            return
+        self._conn.execute(
+            "ALTER TABLE recognitions "
+            "ADD COLUMN png_size INTEGER NOT NULL DEFAULT 0")
+        # One-time backfill from files on disk so stats() can rely on the DB.
+        rows = self._conn.execute(
+            "SELECT id, image_sha256 FROM recognitions").fetchall()
+        for row in rows:
+            try:
+                size = self._png_path(row["image_sha256"]).stat().st_size
+            except OSError:
+                size = 0
+            self._conn.execute(
+                "UPDATE recognitions SET png_size = ? WHERE id = ?",
+                (size, row["id"]))
+        self._conn.commit()
 
     def _png_path(self, sha: str) -> Path:
         return self.cache_dir / sha[:2] / f"{sha}.png"
@@ -126,15 +150,18 @@ class Storage:
         rel = f"{sha256[:2]}/{sha256}.png"
         path = self._png_path(sha256)
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Write PNG first (so DB row never points at a missing file)
-        path.write_bytes(png_bytes)
+        # Write PNG first (so DB row never points at a missing file); the
+        # same image may already be cached on disk from a concurrent insert.
+        if not path.exists():
+            path.write_bytes(png_bytes)
         try:
             with self._lock:
                 cur = self._conn.execute(
                     "INSERT INTO recognitions "
                     "(image_sha256, created_at, image_rel, text, latex, "
-                    " confidence, is_printed, is_handwritten, request_id, raw_json) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    " confidence, is_printed, is_handwritten, request_id, "
+                    " raw_json, png_size) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         sha256,
                         time.time(),
@@ -146,6 +173,7 @@ class Storage:
                         1 if result.get("is_handwritten") else 0,
                         result.get("request_id", ""),
                         json.dumps(result),
+                        len(png_bytes),
                     ),
                 )
                 self._conn.commit()
@@ -341,20 +369,14 @@ class Storage:
         with self._lock:
             cur = self._conn.execute(
                 "SELECT COUNT(*) AS n, MIN(created_at) AS first, "
-                "MAX(created_at) AS last FROM recognitions")
+                "MAX(created_at) AS last, "
+                "COALESCE(SUM(png_size), 0) AS cache_bytes FROM recognitions")
             row = cur.fetchone()
-        # Disk usage of cache dir
-        size = 0
-        for sub in self.cache_dir.glob("**/*.png"):
-            try:
-                size += sub.stat().st_size
-            except Exception:
-                pass
         return {
             "count": int(row["n"] or 0),
             "first_at": row["first"],
             "last_at": row["last"],
-            "cache_bytes": size,
+            "cache_bytes": int(row["cache_bytes"] or 0),
         }
 
 
@@ -375,6 +397,9 @@ def _selftest() -> int:
                        {"text": "$y$", "latex_styled": "y", "confidence": 0.5})
         assert r1 != r2 and r1 > 0 and r2 > 0
         assert len(st.list_recent()) == 2
+        # cache size comes from the DB, not a directory walk
+        expected = len(b"\x89PNG fake1") + len(b"\x89PNG fake2")
+        assert st.stats()["cache_bytes"] == expected
         # search
         assert len(st.list_recent("y")) == 1
         # cache hit returns same row
@@ -395,7 +420,31 @@ def _selftest() -> int:
         pngs = list((Path(tmp) / "ocrmath" / "cache").glob("**/*.png"))
         assert pngs == [], f"expected empty cache, got {pngs}"
         st.close()
-        print("OK")
+    # migration: a pre-png_size database gets the column backfilled from disk
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp) / "ocrmath"
+        sha = "c" * 64
+        png_dir = base / "cache" / sha[:2]
+        png_dir.mkdir(parents=True)
+        (png_dir / f"{sha}.png").write_bytes(b"\x89PNG old")
+        conn = sqlite3.connect(str(base / "ocrmath.db"))
+        conn.execute(
+            "CREATE TABLE recognitions ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "image_sha256 TEXT NOT NULL UNIQUE, created_at REAL NOT NULL,"
+            "image_rel TEXT NOT NULL, text TEXT, latex TEXT, confidence REAL,"
+            "is_printed INTEGER, is_handwritten INTEGER, request_id TEXT,"
+            "raw_json TEXT)")
+        conn.execute(
+            "INSERT INTO recognitions (image_sha256, created_at, image_rel) "
+            "VALUES (?, ?, ?)", (sha, time.time(), f"{sha[:2]}/{sha}.png"))
+        conn.commit()
+        conn.close()
+        st = Storage(base)
+        assert st.stats()["cache_bytes"] == len(b"\x89PNG old"), \
+            f"migration backfill failed: {st.stats()}"
+        st.close()
+    print("OK")
     return 0
 
 

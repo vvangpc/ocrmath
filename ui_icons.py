@@ -10,6 +10,10 @@ from PyQt6.QtGui import (
 PRIMARY = "#ff6a00"
 INK = "#263238"
 
+# Icons are immutable once drawn; cache them so repeated icon() calls during
+# window construction don't re-render the same pixmap.
+_ICON_CACHE: dict[tuple, QIcon] = {}
+
 
 def _pixmap(size: int) -> tuple[QPixmap, QPainter]:
     pix = QPixmap(size, size)
@@ -21,6 +25,10 @@ def _pixmap(size: int) -> tuple[QPixmap, QPainter]:
 
 def app_icon(size: int = 64, *, busy: bool = False) -> QIcon:
     """Return the app/tray icon."""
+    key = ("app", size, busy)
+    cached = _ICON_CACHE.get(key)
+    if cached is not None:
+        return cached
     pix, painter = _pixmap(size)
     pad = max(2, int(size * 0.05))
     rect = QRectF(pad, pad, size - pad * 2, size - pad * 2)
@@ -53,11 +61,17 @@ def app_icon(size: int = 64, *, busy: bool = False) -> QIcon:
     path.lineTo(size * 0.68, size * 0.75)
     painter.drawPath(path)
     painter.end()
-    return QIcon(pix)
+    result = QIcon(pix)
+    _ICON_CACHE[key] = result
+    return result
 
 
 def icon(name: str, color: str = INK, size: int = 24) -> QIcon:
     """Return a named line icon."""
+    key = (name, color, size)
+    cached = _ICON_CACHE.get(key)
+    if cached is not None:
+        return cached
     pix, painter = _pixmap(size)
     c = QColor(color)
     pen = QPen(c, max(1.6, size * 0.085), Qt.PenStyle.SolidLine,
@@ -134,4 +148,6 @@ def icon(name: str, color: str = INK, size: int = 24) -> QIcon:
         painter.drawEllipse(QRectF(s * .28, s * .28, s * .44, s * .44))
 
     painter.end()
-    return QIcon(pix)
+    result = QIcon(pix)
+    _ICON_CACHE[key] = result
+    return result

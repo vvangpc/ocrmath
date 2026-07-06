@@ -1,9 +1,9 @@
 # ocrmath
 
 > 自制 Mathpix Snipping Tool 替代品 — 调用 Mathpix API 实现截屏公式识别 + PDF 转 Markdown / DOCX。
-> 用 pay-as-you-go 套餐替代月度订阅，按 100 张截图 / 月计算约 $0.20，比订阅档（$4.99-$19/月）便宜 90% 以上。
+> 用 pay-as-you-go 套餐替代月度订阅：按 100 张截图 / 月约 $0.20，比订阅档（$4.99–$19/月）省 90% 以上。
 
-![Python](https://img.shields.io/badge/python-3.10%2B-blue) ![PyQt6](https://img.shields.io/badge/GUI-PyQt6-green) ![License](https://img.shields.io/badge/license-MIT-orange)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue) ![PyQt6](https://img.shields.io/badge/GUI-PyQt6-green) ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey) ![License](https://img.shields.io/badge/license-MIT-orange)
 
 ---
 
@@ -12,10 +12,12 @@
 | | |
 |---|---|
 | **截屏公式识别** | 全局快捷键唤起 → 鼠标拖选公式区域 → 自动识别 → 一键复制 LaTeX |
-| **LaTeX 实时预览** | 结果窗口内置 MathJax 矢量渲染，所见即所得，支持中文混排 |
+| **LaTeX 实时预览** | 结果窗口内置 MathJax 矢量渲染，所见即所得，支持中英公式与中文混排 |
 | **本地缓存** | SHA256 去重，相同区域第二次识别零成本零网络 |
-| **历史记录** | 主窗口"历史记录"标签页：搜索 / 复制 / 重新打开 / 删除 |
+| **历史记录** | 主窗口「历史记录」标签页：搜索 / 复制 / 重新打开 / 删除，缩略图后台加载不卡界面 |
 | **PDF 转换** | 拖拽 PDF → 选输出格式（MMD/MD/DOCX/TeX/HTML/带文字层 PDF）→ 异步进度条 |
+| **使用统计** | 主窗口展示本月 / 今日的识别次数、PDF 页数与累计花费 |
+| **WebDAV 同步** | 可选：把计数器与凭证同步到自建 WebDAV（Nextcloud 等），多机共享额度视图 |
 | **托盘常驻** | 关闭主窗口最小化到托盘；识别中托盘图标闪烁状态指示 |
 | **可自定义快捷键** | 设置对话框中按下任意组合键即可记录 |
 | **加密凭证存储** | Windows DPAPI 与当前用户绑定，明文不落盘 |
@@ -27,19 +29,19 @@
 | 截屏识别 (`/v3/text`) | **$0.002 / 张** | $0.20 |
 | PDF 转换 (`/v3/pdf`) | **$0.005 / 页** | $0.50（按 100 页） |
 
-PAYG 一次性 $19.99 启动费。含 12 行以上文本的图像按 PDF 单价计费。
+PAYG 一次性 $19.99 启动费。含 12 行以上文本的图像按 PDF 单价计费。应用内单价可在设置中调整，统计随之更新。
 
 ## 安装
 
 ### 方式 A：使用安装包（推荐普通用户）
 
 1. 到 [Releases](https://github.com/vvangpc/ocrmath/releases) 下载最新 `ocrmath-setup-x.y.z.exe`
-2. 双击安装，按提示完成
-3. 启动菜单或桌面打开 **ocrmath**
+2. 双击安装（per-user，无需管理员），按提示完成
+3. 从开始菜单或桌面打开 **ocrmath**
 
 ### 方式 B：从源码运行（开发者）
 
-需要 Python 3.10+（推荐 3.13）。
+需要 Python 3.10+（推荐 3.13 及以上）。
 
 ```powershell
 git clone https://github.com/vvangpc/ocrmath.git
@@ -61,14 +63,14 @@ python main.py
 
 1. 按全局快捷键（默认 `Ctrl+Alt+M`）或点击托盘图标
 2. 屏幕变暗后用鼠标拖选公式区域，松开
-3. 等待 1-2 秒，结果窗口弹出
+3. 等待 1–2 秒，结果窗口弹出
 4. 点击行内 / 独立 LaTeX 旁的「复制」按钮即可粘贴
 5. 复制后窗口自动关闭
 
 ### PDF 转换
 
-1. 主窗口切到"PDF 转换"标签
-2. 拖入 PDF 或点"选择 PDF…"
+1. 主窗口切到「PDF 转换」标签
+2. 拖入 PDF 或点「选择 PDF…」
 3. 勾选所需输出格式：
    - **MMD** — Mathpix Markdown，公式用 `$...$` 保留 LaTeX，适合 Typora / Obsidian
    - **MD** — 标准 Markdown，适合 GitHub / 通用编辑器
@@ -77,13 +79,14 @@ python main.py
    - **HTML** — 网页
    - **带文字层 PDF** — 原 PDF 但可选中复制文字
 4. 输出目录默认与所选 PDF 同目录
-5. 点"开始转换"，进度条流畅推进，完成后自动打开输出文件夹
+5. 点「开始转换」，进度条流畅推进，完成后自动打开输出文件夹
 
 ### 历史记录
 
-切到"历史记录"标签页，可：
-- 搜索（300ms 节流）
-- 单击双击行 → 重新打开结果窗口
+切到「历史记录」标签页，可：
+
+- 搜索（300ms 节流），缩略图在后台线程加载，不阻塞界面
+- 单击 / 双击行 → 重新打开结果窗口
 - 复制 LaTeX
 - 删除单条 / 清空整库
 
@@ -91,45 +94,51 @@ python main.py
 
 ```
 %APPDATA%\ocrmath\
-├── config.dat      # DPAPI 加密的凭证 + 快捷键
-├── ocrmath.db      # SQLite：识别结果缓存与历史索引
-└── cache\          # 截屏 PNG 文件（按 SHA256 前两位分桶）
-    ├── ab\
-    │   └── ab12...ef.png
-    └── cd\...
+├── config.dat      # DPAPI 加密的凭证 + 快捷键 + WebDAV 配置
+├── ocrmath.db      # SQLite：识别结果缓存、历史索引、使用记录
+├── cache\          # 截屏 PNG 文件（按 SHA256 前两位分桶）
+│   ├── ab\
+│   │   └── ab12...ef.png
+│   └── cd\...
+└── mathjax\        # 首次联网下载的 tex-svg.js (~1MB) 与预览模板
 ```
 
 ## 项目结构
 
 ```
-main.py            # 入口：托盘 + 全局热键 + 缓存查找 + 信号串联
-main_window.py     # 主窗口（QTabWidget：截屏 / PDF / 历史）
-snipper.py         # 全屏半透明截图 widget
+main.py            # 入口：托盘 + 全局热键 + 缓存查找 + 信号串联 + 后台任务调度
+main_window.py     # 主窗口（QTabWidget：截屏 / PDF / 历史）+ 使用统计卡片
+snipper.py         # 全屏半透明截图 widget（多显示器拼接）
 result_window.py   # 截图结果展示窗（含 LaTeX 预览 + 缓存徽章）
-pdf_panel.py       # PDF 转换 UI
-history_panel.py   # 历史记录面板
+pdf_panel.py       # PDF 转换 UI（拖拽 + 进度 + 日志）
+history_panel.py   # 历史记录面板（后台缩略图加载）
 image_client.py    # /v3/text 调用 + QThread worker
-pdf_client.py      # /v3/pdf 提交/轮询/下载 + QThread worker
-storage.py         # SQLite 缓存 + 历史 + PNG 文件管理
-mathjax_view.py    # MathJax 3 + QWebEngineView 矢量渲染（首次启动从 jsdelivr 下载 ~1MB）
-config.py          # DPAPI 加密读写 + 快捷键存储
-settings_dialog.py # API key + 快捷键设置对话框
+pdf_client.py      # /v3/pdf 提交 / 轮询 / 下载 + QThread worker
+api_common.py      # 两个 API client 共用的请求错误格式化
+storage.py         # SQLite 缓存 + 历史 + 使用记录 + PNG 文件管理
+config.py          # DPAPI 加密读写 + 快捷键 / 计价 / WebDAV 配置
+webdav.py          # WebDAV 同步 worker
+mathjax_view.py    # MathJax 3 + QWebEngineView 矢量渲染（首次从 jsdelivr 下载）
+settings_dialog.py # API key / 快捷键 / 计价 / WebDAV 设置对话框
 styles.py          # 全局 QSS 主题
+ui_icons.py        # 纯 Qt 绘制的矢量图标（带缓存）
 ```
 
 ## 自行打包
 
-机器需安装 [Inno Setup 6](https://jrsoftware.org/isdl.php)。
+需要机器安装 [Inno Setup 6.5+](https://jrsoftware.org/isdl.php)（内置的中文语言文件已随仓库提供在 `installer\ChineseSimplified.isl`，要求 6.5 及以上版本编译）。
 
 ```powershell
 pip install pyinstaller
-python -m PyInstaller build.spec
-& "C:\Users\$env:USERNAME\AppData\Local\Programs\Inno Setup 6\ISCC.exe" installer.iss
+python -m PyInstaller build.spec --clean
+& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
 ```
 
-输出在 `dist\installer\ocrmath-setup-x.y.z.exe`。
+输出在 `dist\installer\ocrmath-setup-x.y.z.exe`。发版号在 `pyproject.toml` 与 `installer.iss` 两处，需保持一致。
 
 ## API 烟雾测试（不打开 GUI）
+
+`test_image_api.py` / `test_pdf_api.py` 是需要真实凭证的手动冒烟脚本，非自动化单测：
 
 ```powershell
 $env:MATHPIX_APP_ID = "your_app_id"
@@ -138,6 +147,8 @@ $env:MATHPIX_APP_KEY = "your_app_key"
 python test_image_api.py path\to\equation.png
 python test_pdf_api.py path\to\small.pdf
 ```
+
+`storage.py` 带内置自测：`python storage.py --test`。
 
 ## 故障排查
 
@@ -154,12 +165,14 @@ python test_pdf_api.py path\to\small.pdf
 
 - 所有图像和 PDF **直接发送到 Mathpix**（HTTPS），ocrmath 不上传到其他服务器
 - API 凭证用 Windows DPAPI 加密，与当前 Windows 用户账户绑定，他人复制走也解不开
+- 可选的 WebDAV 同步只连接你自己配置的服务器
 - 识别结果缓存在本地 `%APPDATA%\ocrmath\ocrmath.db`
-- Mathpix 会保留你提交的源 PDF 30 天，输出文件 90 天，详见 [Mathpix Privacy](https://mathpix.com/privacy)
+- Mathpix 会保留你提交的源 PDF 30 天、输出文件 90 天，详见 [Mathpix Privacy](https://mathpix.com/privacy)
 
 ## 贡献
 
 欢迎 issue / PR。建议优先方向：
+
 - 跨平台支持（macOS / Linux）— 目前 DPAPI 仅 Windows 可用，其他系统使用明文存储
 - 自动粘贴到上一焦点窗口（参考 Mathpix Snip）
 - 深色模式 QSS

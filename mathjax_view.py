@@ -144,12 +144,18 @@ function showMessage(msg) {
 
 
 def _write_html_template() -> Path:
-    """Write the HTML to the cache dir and return its path. Re-writes every
-    call so template tweaks ship without manual cache cleanup."""
+    """Write the HTML to the cache dir and return its path. Skips the write
+    when the on-disk copy already matches, so template tweaks still ship
+    without manual cache cleanup but unchanged views cost no disk write."""
     cache = cache_dir()
     cache.mkdir(parents=True, exist_ok=True)
     html = _HTML_TEMPLATE.replace("__MATHJAX_FILE__", MATHJAX_FILENAME)
     p = html_path()
+    try:
+        if p.read_text(encoding="utf-8") == html:
+            return p
+    except OSError:
+        pass
     p.write_text(html, encoding="utf-8")
     return p
 
@@ -194,6 +200,11 @@ class MathJaxDownloader(QThread):
             self.failed.emit(str(exc))
             return
         self.finished_ok.emit(str(target))
+
+
+# One downloader for the whole process: several MathJaxViews created during
+# the first launch would otherwise each fetch their own 1MB copy in parallel.
+_shared_downloader: MathJaxDownloader | None = None
 
 
 # ---- widget ----------------------------------------------------------------
@@ -267,13 +278,17 @@ if WEBENGINE_AVAILABLE:
             self.setHtml(placeholder, QUrl.fromLocalFile(str(cache_dir()) + "/"))
 
         def _kick_download(self) -> None:
-            if self._downloader is not None and self._downloader.isRunning():
-                return
-            d = MathJaxDownloader(self)
+            global _shared_downloader
+            d = _shared_downloader
+            needs_start = d is None or not d.isRunning()
+            if needs_start:
+                d = MathJaxDownloader()
+                _shared_downloader = d
             d.finished_ok.connect(self._on_download_ok)
             d.failed.connect(self._on_download_fail)
             self._downloader = d
-            d.start()
+            if needs_start:
+                d.start()
 
         def _on_download_ok(self, _path: str) -> None:
             self._downloader = None

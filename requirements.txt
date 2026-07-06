@@ -1,6 +1,6 @@
-PyQt6>=6.6
-PyQt6-WebEngine>=6.6
-requests>=2.31
-keyboard>=0.13
-pywin32>=306; sys_platform == "win32"
-pypdf>=4.0
+PyQt6>=6.6,<7.0
+PyQt6-WebEngine>=6.6,<7.0
+requests>=2.31,<3.0
+keyboard>=0.13,<0.14
+pywin32>=306,<400; sys_platform == "win32"
+pypdf>=4.0,<7.0

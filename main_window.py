@@ -112,7 +112,7 @@ class MainWindow(QMainWindow):
         change_btn.setIcon(icon("settings"))
         change_btn.setIconSize(QSize(16, 16))
         change_btn.setFixedWidth(80)
-        change_btn.clicked.connect(lambda: self._on_open_settings())
+        change_btn.clicked.connect(self._on_open_settings)
 
         card_l.addWidget(hk_left)
         card_l.addWidget(self.hotkey_label, 1)
@@ -125,7 +125,7 @@ class MainWindow(QMainWindow):
         snip_btn.setIconSize(QSize(22, 22))
         snip_btn.setMinimumHeight(48)
         snip_btn.setStyleSheet("font-size: 12pt;")
-        snip_btn.clicked.connect(lambda: self._on_snip())
+        snip_btn.clicked.connect(self._on_snip)
         layout.addWidget(snip_btn)
 
         # Steps card
@@ -157,7 +157,7 @@ class MainWindow(QMainWindow):
         settings_btn = QPushButton("设置")
         settings_btn.setIcon(icon("settings"))
         settings_btn.setIconSize(QSize(16, 16))
-        settings_btn.clicked.connect(lambda: self._on_open_settings())
+        settings_btn.clicked.connect(self._on_open_settings)
         bottom.addWidget(settings_btn)
         bottom.addStretch(1)
 
@@ -282,8 +282,11 @@ class MainWindow(QMainWindow):
             pass
 
     def refresh_history_panel(self) -> None:
+        # Hidden panel reloads itself on showEvent, so refreshing it here
+        # would be wasted work.
         try:
-            self.history_panel.refresh()
+            if self.history_panel.isVisible():
+                self.history_panel.refresh()
         except Exception:
             pass
 
@@ -301,9 +304,8 @@ class MainWindow(QMainWindow):
     # ---- internal ----------------------------------------------------------
 
     def _on_tab_changed(self, idx: int) -> None:
-        if self._tabs.widget(idx) is self.history_panel:
-            self.history_panel.refresh()
-        elif self._tabs.widget(idx) is self.snip_tab:
+        # History refreshes itself in showEvent when its tab becomes current.
+        if self._tabs.widget(idx) is self.snip_tab:
             self.refresh_stats()
 
     def _on_pages_processed(self, n: int) -> None:

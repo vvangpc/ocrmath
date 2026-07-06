@@ -1,0 +1,23 @@
+# NOTE: keep `version` in sync with AppVersion in installer.iss when releasing.
+[project]
+name = "ocrmath"
+version = "1.1.2"
+description = "Mathpix OCR desktop tool: screenshot formula recognition + PDF to Markdown"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "vvangpc" }]
+requires-python = ">=3.10"
+dependencies = [
+    "PyQt6>=6.6,<7.0",
+    "PyQt6-WebEngine>=6.6,<7.0",
+    "requests>=2.31,<3.0",
+    "keyboard>=0.13,<0.14",
+    "pywin32>=306,<400; sys_platform == 'win32'",
+    "pypdf>=4.0,<7.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/vvangpc/ocrmath"
+
+[project.optional-dependencies]
+build = ["pyinstaller"]

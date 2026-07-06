@@ -39,7 +39,9 @@ a = Analysis(
         "scipy", "numpy.f2py", "IPython",
     ],
     noarchive=False,
-    optimize=0,
+    # -OO bytecode (drops docstrings) — smaller PYZ. Keep strip/upx off:
+    # both are known to corrupt Qt6 DLLs on Windows and trip AV heuristics.
+    optimize=2,
 )
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)

@@ -4,8 +4,8 @@ from __future__ import annotations
 import time
 from typing import Callable
 
-from PyQt6.QtCore import QSize, Qt, QTimer
-from PyQt6.QtGui import QPixmap, QImage, QGuiApplication
+from PyQt6.QtCore import QSize, Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtGui import QPixmap, QImage, QGuiApplication, QShowEvent
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
     QListWidget, QListWidgetItem, QMessageBox,
@@ -25,34 +25,51 @@ def _truncate(s: str, n: int = 80) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
+class _ThumbLoader(QThread):
+    """Reads and decodes cached PNGs off the UI thread.
+
+    Emits one thumbnail_ready per sha (a null QImage marks a missing file).
+    The generation number lets the panel drop results from a superseded
+    refresh."""
+
+    thumbnail_ready = pyqtSignal(int, str, QImage)  # generation, sha, image
+
+    def __init__(self, storage: Storage, shas: list[str], generation: int,
+                 parent=None):
+        super().__init__(parent)
+        self._storage = storage
+        self._shas = shas
+        self._generation = generation
+
+    def run(self) -> None:
+        for sha in self._shas:
+            if self.isInterruptionRequested():
+                return
+            png = self._storage.png_bytes(sha)
+            img = QImage.fromData(png, "PNG") if png else QImage()
+            self.thumbnail_ready.emit(self._generation, sha, img)
+
+
 class HistoryRow(QWidget):
     """One row in the history list."""
 
     def __init__(self,
                  rec: Recognition,
-                 thumb: QPixmap | None,
                  on_open: Callable[[Recognition], None],
                  on_delete: Callable[[Recognition], None]):
         super().__init__()
         self.rec = rec
 
-        # Thumbnail
-        thumb_lbl = QLabel()
+        # Thumbnail placeholder; the real image arrives via set_thumbnail()
+        # once the background loader has decoded it.
+        thumb_lbl = QLabel("…")
         thumb_lbl.setFixedSize(96, 56)
         thumb_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         thumb_lbl.setStyleSheet(
             "background:#fafafa; border:1px solid #e2e2e2; border-radius:4px;"
         )
-        if thumb is not None and not thumb.isNull():
-            scaled = thumb.scaled(
-                94, 54,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            thumb_lbl.setPixmap(scaled)
-        else:
-            thumb_lbl.setText("(无图)")
-            thumb_lbl.setProperty("role", "muted")
+        thumb_lbl.setProperty("role", "muted")
+        self._thumb_lbl = thumb_lbl
 
         # Header line: timestamp + confidence
         header = QHBoxLayout()
@@ -109,6 +126,18 @@ class HistoryRow(QWidget):
         outer.addWidget(thumb_lbl)
         outer.addLayout(right, 1)
 
+    def set_thumbnail(self, thumb: QPixmap) -> None:
+        if thumb.isNull():
+            self._thumb_lbl.setText("(无图)")
+            return
+        scaled = thumb.scaled(
+            94, 54,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._thumb_lbl.setText("")
+        self._thumb_lbl.setPixmap(scaled)
+
     def _copy(self) -> None:
         latex = self.rec.latex or self.rec.text
         if not latex:
@@ -126,6 +155,9 @@ class HistoryPanel(QWidget):
         super().__init__(parent)
         self._storage = storage
         self._on_open_cb = on_open
+        self._generation = 0
+        self._thumb_loader: _ThumbLoader | None = None
+        self._rows_by_sha: dict[str, HistoryRow] = {}
 
         # ---- top bar ----
         self.search_edit = QLineEdit()
@@ -167,29 +199,42 @@ class HistoryPanel(QWidget):
         layout.addWidget(self.summary)
         layout.addWidget(self.list_widget, 1)
 
-        self.refresh()
-
     # ---- public ------------------------------------------------------------
+
+    def showEvent(self, evt: QShowEvent) -> None:
+        # The panel lives inside a QTabWidget: it is shown each time its tab
+        # becomes current, so this doubles as the tab-switch refresh. It also
+        # means the panel loads nothing at app startup.
+        super().showEvent(evt)
+        self.refresh()
 
     def refresh(self) -> None:
         query = self.search_edit.text().strip()
         recs = self._storage.list_recent(query=query, limit=300)
         self.list_widget.clear()
+        self._rows_by_sha.clear()
+        self._generation += 1
+        if self._thumb_loader is not None and self._thumb_loader.isRunning():
+            self._thumb_loader.requestInterruption()
 
         for rec in recs:
-            png = self._storage.png_bytes(rec.image_sha256)
-            thumb: QPixmap | None = None
-            if png:
-                img = QImage.fromData(png, "PNG")
-                if not img.isNull():
-                    thumb = QPixmap.fromImage(img)
-            row = HistoryRow(rec, thumb,
+            row = HistoryRow(rec,
                              on_open=self._on_open,
                              on_delete=self._on_delete)
             item = QListWidgetItem(self.list_widget)
             item.setSizeHint(row.sizeHint())
             self.list_widget.addItem(item)
             self.list_widget.setItemWidget(item, row)
+            self._rows_by_sha[rec.image_sha256] = row
+
+        if recs:
+            loader = _ThumbLoader(self._storage,
+                                  [r.image_sha256 for r in recs],
+                                  self._generation, self)
+            loader.thumbnail_ready.connect(self._on_thumbnail_ready)
+            loader.finished.connect(loader.deleteLater)
+            self._thumb_loader = loader
+            loader.start()
 
         stats = self._storage.stats()
         size_mb = stats["cache_bytes"] / 1024 / 1024
@@ -200,6 +245,14 @@ class HistoryPanel(QWidget):
         )
 
     # ---- internal ----------------------------------------------------------
+
+    def _on_thumbnail_ready(self, generation: int, sha: str,
+                            img: QImage) -> None:
+        if generation != self._generation:
+            return
+        row = self._rows_by_sha.get(sha)
+        if row is not None:
+            row.set_thumbnail(QPixmap.fromImage(img))
 
     def _on_open(self, rec: Recognition) -> None:
         self._on_open_cb(rec)

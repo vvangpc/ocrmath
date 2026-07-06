@@ -8,6 +8,8 @@ from typing import Any
 import requests
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from api_common import format_request_error
+
 API_URL = "https://api.mathpix.com/v3/text"
 
 
@@ -63,11 +65,5 @@ class ImageOcrWorker(QThread):
                 self.failed.emit(str(result.get("error")))
                 return
             self.finished_ok.emit(result)
-        except requests.HTTPError as exc:
-            status = exc.response.status_code if exc.response is not None else "?"
-            body = exc.response.text if exc.response is not None else ""
-            self.failed.emit(f"HTTP {status}: {body[:300]}")
-        except requests.RequestException as exc:
-            self.failed.emit(f"Network error: {exc}")
         except Exception as exc:
-            self.failed.emit(f"Unexpected: {exc}")
+            self.failed.emit(format_request_error(exc))
