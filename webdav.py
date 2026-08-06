@@ -9,12 +9,12 @@ Envelope on the wire:
 
 Conflict resolution (see merge()):
     counters: max(local, remote)              (offline accumulation safe)
-    creds + prices: last-write-wins by synced_at timestamp
+    creds + prices + rate: last-write-wins — remote side by its synced_at,
+    local side by settings_modified_at (when the user last edited them)
 """
 from __future__ import annotations
 
 import json
-import sys
 import threading
 import time
 from typing import Callable
@@ -165,7 +165,8 @@ def merge(local_data: dict, local_ts: float,
     out["pdf_page_count"] = max(int(local_data.get("pdf_page_count", 0)),
                                 int(remote_data.get("pdf_page_count", 0)))
     winner = remote_data if remote_ts > local_ts else local_data
-    for k in ("app_id", "app_key", "image_price_usd", "pdf_price_usd"):
+    for k in ("app_id", "app_key", "image_price_usd", "pdf_price_usd",
+              "usd_cny_rate"):
         if k in winner:
             out[k] = winner[k]
         elif k in local_data:
@@ -173,12 +174,14 @@ def merge(local_data: dict, local_ts: float,
     return out
 
 
-def sync_once() -> float:
+def sync_once(wd: dict | None = None) -> float:
     """Download → merge → upload. Returns the new synced_at epoch.
 
+    `wd` overrides the stored WebDAV settings (used by the settings dialog
+    so "sync now" works on unsaved form values without persisting them).
     Raises RuntimeError if WebDAV is not configured or the network call fails.
     """
-    wd = config.get_webdav()
+    wd = wd or config.get_webdav()
     if not wd["url"] or not wd["user"]:
         raise RuntimeError("WebDAV 未配置")
 
@@ -186,7 +189,7 @@ def sync_once() -> float:
         raise RuntimeError("另一次同步正在进行")
     try:
         local_data = config.get_syncable_payload()
-        local_ts = config.get_last_synced()
+        local_ts = config.get_modified_at()
 
         remote_env = download(wd["url"], wd["user"], wd["password"], wd["path"])
         if remote_env is not None and isinstance(remote_env.get("data"), dict):
@@ -220,8 +223,9 @@ class WebDavSyncWorker(QThread):
     finished_ok = pyqtSignal(float)   # synced_at epoch
     failed = pyqtSignal(str)
 
-    def __init__(self, parent=None):
+    def __init__(self, wd: dict | None = None, parent=None):
         super().__init__(parent)
+        self._wd = wd
         _ACTIVE_WORKERS.add(self)
         # Queued so the discard (possibly the last reference) runs on the
         # main thread after the worker thread has fully wound down.
@@ -230,27 +234,25 @@ class WebDavSyncWorker(QThread):
 
     def run(self) -> None:
         try:
-            ts = sync_once()
+            ts = sync_once(self._wd)
         except Exception as exc:
             self.failed.emit(str(exc))
             return
         self.finished_ok.emit(ts)
 
 
-def fire_and_forget(on_done: Callable[[float], None] | None = None,
-                    on_fail: Callable[[str], None] | None = None
-                    ) -> WebDavSyncWorker | None:
-    """Best-effort background sync. Returns the worker (caller may keep ref)
-    or None if WebDAV isn't configured."""
-    wd = config.get_webdav()
-    if not wd["url"] or not wd["user"]:
-        return None
-    w = WebDavSyncWorker()
-    if on_done:
-        w.finished_ok.connect(on_done)
+def start_worker(on_ok: Callable[[float], None] | None = None,
+                 on_fail: Callable[[str], None] | None = None,
+                 on_finished: Callable[[], None] | None = None,
+                 wd: dict | None = None) -> WebDavSyncWorker:
+    """Create, wire and start a sync worker. Caller may keep the return
+    value as a reentrancy guard; _ACTIVE_WORKERS keeps it alive regardless."""
+    w = WebDavSyncWorker(wd=wd)
+    if on_ok:
+        w.finished_ok.connect(on_ok)
     if on_fail:
         w.failed.connect(on_fail)
-    else:
-        w.failed.connect(lambda msg: sys.stderr.write(f"webdav sync failed: {msg}\n"))
+    if on_finished:
+        w.finished.connect(on_finished)
     w.start()
     return w

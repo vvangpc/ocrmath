@@ -81,7 +81,7 @@ class App(QObject):
 
         # First-run prompt
         if config.load() is None:
-            self.open_settings(first_run=True)
+            self.open_settings()
 
         # Startup auto-sync (best-effort, after UI is up)
         self._reconfigure_periodic_timer()
@@ -94,10 +94,8 @@ class App(QObject):
     def _get_creds(self) -> dict | None:
         return config.load()
 
-    def open_settings(self, first_run: bool = False) -> None:
+    def open_settings(self) -> None:
         dlg = SettingsDialog(self.main_win, on_purge_now=self._purge_now)
-        if first_run:
-            dlg.setWindowTitle("欢迎 - 请先设置 Mathpix API")
         dlg.settings_changed.connect(self._on_settings_changed)
         dlg.exec()
 
@@ -228,8 +226,7 @@ class App(QObject):
             QMessageBox.warning(
                 None, "热键注册失败",
                 f"无法注册全局快捷键 "
-                f"{config.keyboard_to_qt(hotkey)}: {exc}\n"
-                "可以从托盘菜单或主窗口手动触发。")
+                f"{config.keyboard_to_qt(hotkey)}: {exc}")
             self._current_hotkey = ""
         self._refresh_tray_text()
 
@@ -252,6 +249,10 @@ class App(QObject):
         self.snipper.start()
 
     def _on_captured(self, png: bytes) -> None:
+        # Single-flight: _pending_sha/_pending_png are shared state, so a
+        # second capture while one is recognizing must be ignored.
+        if self._worker is not None:
+            return
         sha = hashlib.sha256(png).hexdigest()
         cached = self.storage.lookup(sha)
         if cached is not None:
@@ -267,7 +268,13 @@ class App(QObject):
         self._worker = ImageOcrWorker(png, creds["app_id"], creds["app_key"])
         self._worker.finished_ok.connect(self._on_ocr_ok)
         self._worker.failed.connect(self._on_ocr_failed)
+        # Drop our reference only after the thread has fully wound down —
+        # clearing it inside a result slot can GC a still-running QThread.
+        self._worker.finished.connect(self._clear_image_worker)
         self._worker.start()
+
+    def _clear_image_worker(self) -> None:
+        self._worker = None
 
     def _on_ocr_ok(self, result: dict) -> None:
         self._stop_busy()
@@ -281,7 +288,6 @@ class App(QObject):
         self.result_win.show_result(result, from_cache=False)
         self._pending_sha = None
         self._pending_png = None
-        self._worker = None
         # Bill the API call: cache hits exit before we get here.
         try:
             config.bump_image_count(1)
@@ -306,7 +312,6 @@ class App(QObject):
         QMessageBox.critical(None, "识别失败", msg)
         self._pending_sha = None
         self._pending_png = None
-        self._worker = None
 
     def _on_history_open(self, rec: Recognition) -> None:
         self.result_win.show_result(rec.result, from_cache=True)
@@ -379,12 +384,9 @@ class App(QObject):
             return
         if self._sync_worker is not None:
             return
-        w = webdav.WebDavSyncWorker()
-        w.finished_ok.connect(self._on_sync_ok)
-        w.failed.connect(self._on_sync_fail)
-        w.finished.connect(self._sync_cleanup)
-        self._sync_worker = w
-        w.start()
+        self._sync_worker = webdav.start_worker(
+            on_ok=self._on_sync_ok, on_fail=self._on_sync_fail,
+            on_finished=self._sync_cleanup)
 
     def _run_exit_sync_blocking(self, timeout_ms: int = 5000) -> None:
         """Block UI for up to timeout_ms while a final sync completes."""
@@ -398,14 +400,12 @@ class App(QObject):
         # Keep a reference on self: if the sync outlives the timeout, letting
         # the QThread be garbage-collected while still running aborts the app
         # ("QThread: Destroyed while thread is still running").
-        worker = webdav.WebDavSyncWorker()
-        self._exit_sync_worker = worker
-        worker.finished_ok.connect(lambda *_a: loop.quit())
-        worker.failed.connect(
-            lambda msg: (sys.stderr.write(f"exit sync failed: {msg}\n"),
-                         loop.quit()))
         finish_timer.start(timeout_ms)
-        worker.start()
+        worker = webdav.start_worker(
+            on_ok=lambda *_a: loop.quit(),
+            on_fail=lambda msg: (
+                sys.stderr.write(f"exit sync failed: {msg}\n"), loop.quit()))
+        self._exit_sync_worker = worker
         loop.exec()
         # Best-effort: give the worker a brief grace window to land its result.
         worker.wait(500)
@@ -420,12 +420,9 @@ class App(QObject):
         if self._sync_worker is not None:
             return
         self.main_win.set_sync_busy(True)
-        w = webdav.WebDavSyncWorker()
-        w.finished_ok.connect(self._on_sync_ok)
-        w.failed.connect(self._on_sync_fail_manual)
-        w.finished.connect(self._sync_cleanup)
-        self._sync_worker = w
-        w.start()
+        self._sync_worker = webdav.start_worker(
+            on_ok=self._on_sync_ok, on_fail=self._on_sync_fail_manual,
+            on_finished=self._sync_cleanup)
 
     def _on_sync_ok(self, _ts: float) -> None:
         try:

@@ -1,29 +1,21 @@
 """Settings dialog: API credentials + global hotkey + pricing + WebDAV sync."""
 from __future__ import annotations
 
-from datetime import datetime
+import time
 
 from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QKeySequence
 from PyQt6.QtWidgets import (
     QDialog, QFormLayout, QGridLayout, QLabel, QLineEdit, QPushButton,
     QVBoxLayout, QHBoxLayout, QMessageBox, QGroupBox, QKeySequenceEdit,
-    QSpinBox, QInputDialog, QScrollArea, QWidget,
+    QSpinBox, QDoubleSpinBox, QInputDialog, QScrollArea, QWidget,
 )
 
 import config
 import webdav
 from styles import ACCENT
 from ui_icons import icon
-
-
-def _format_synced(ts: float) -> str:
-    if not ts:
-        return "上次同步: 从未"
-    try:
-        return "上次同步: " + datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
-    except Exception:
-        return "上次同步: —"
+from ui_utils import format_synced, format_unit_price
 
 
 class SettingsDialog(QDialog):
@@ -48,31 +40,17 @@ class SettingsDialog(QDialog):
         # `on_purge_now(days) -> int` returns the count of recognitions purged.
         self._on_purge_now = on_purge_now
 
-        # ---- Header ----
-        header = QLabel("应用设置")
-        header.setProperty("role", "heading")
-
-        intro = QLabel(
-            "还没有 API Key？请到 "
-            "<a href='https://accounts.mathpix.com/'>accounts.mathpix.com</a> "
-            "注册 (pay-as-you-go: 一次性 $19.99 + 按量计费)。"
-        )
-        intro.setOpenExternalLinks(True)
-        intro.setWordWrap(True)
-        intro.setProperty("role", "muted")
-
         # ---- API group ----
         api_box = QGroupBox("API 凭证")
         self.id_edit = QLineEdit(all_settings.get("app_id", ""))
-        self.id_edit.setPlaceholderText("Mathpix App ID")
         self.key_edit = QLineEdit(all_settings.get("app_key", ""))
         self.key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.key_edit.setPlaceholderText("Mathpix App Key")
 
         self._show_key_btn = QPushButton("显示")
         self._show_key_btn.setCheckable(True)
         self._show_key_btn.setFixedWidth(64)
-        self._show_key_btn.toggled.connect(self._toggle_key_visible)
+        self._show_key_btn.toggled.connect(
+            lambda on: self._toggle_echo(self.key_edit, self._show_key_btn, on))
 
         key_row = QHBoxLayout()
         key_row.addWidget(self.key_edit, 1)
@@ -86,12 +64,6 @@ class SettingsDialog(QDialog):
 
         # ---- Hotkey group ----
         hk_box = QGroupBox("全局快捷键")
-        hk_intro = QLabel(
-            "组合至少含 Ctrl / Alt / Shift 之一。按 Esc 取消、Backspace 清空。"
-        )
-        hk_intro.setProperty("role", "muted")
-        hk_intro.setWordWrap(True)
-
         self.hotkey_edit = QKeySequenceEdit()
         self.hotkey_edit.setMaximumSequenceLength(1)
         self.hotkey_edit.setKeySequence(
@@ -110,26 +82,29 @@ class SettingsDialog(QDialog):
         hk_layout = QVBoxLayout(hk_box)
         hk_layout.setContentsMargins(10, 14, 10, 10)
         hk_layout.setSpacing(8)
-        hk_layout.addWidget(hk_intro)
         hk_layout.addLayout(hk_row)
 
         # ---- Pricing group ----
         price_box = QGroupBox("终端定价设置")
-        price_intro = QLabel(
-            "Mathpix 当前 PAYG 单价：截图 $0.002/张，PDF $0.005/页。")
-        price_intro.setProperty("role", "muted")
-        price_intro.setWordWrap(True)
-
         self._pending_image_price = float(all_settings.get(
             "image_price_usd", config.DEFAULT_IMAGE_PRICE))
         self._pending_pdf_price = float(all_settings.get(
             "pdf_price_usd", config.DEFAULT_PDF_PRICE))
 
         mono_style = "font-family: 'Consolas', monospace; font-size: 11pt;"
-        self.image_price_label = QLabel(self._fmt_price(self._pending_image_price))
+        self.image_price_label = QLabel(
+            format_unit_price(self._pending_image_price, cny=False))
         self.image_price_label.setStyleSheet(mono_style)
-        self.pdf_price_label = QLabel(self._fmt_price(self._pending_pdf_price))
+        self.pdf_price_label = QLabel(
+            format_unit_price(self._pending_pdf_price, cny=False))
         self.pdf_price_label.setStyleSheet(mono_style)
+
+        self.rate_spin = QDoubleSpinBox()
+        self.rate_spin.setRange(0.1, 100.0)
+        self.rate_spin.setDecimals(2)
+        self.rate_spin.setSingleStep(0.1)
+        self.rate_spin.setValue(float(all_settings.get(
+            "usd_cny_rate", config.DEFAULT_USD_CNY_RATE)))
 
         image_edit_btn = QPushButton("修改…")
         image_edit_btn.setIcon(icon("settings"))
@@ -159,13 +134,14 @@ class SettingsDialog(QDialog):
         price_grid.addWidget(self.pdf_price_label, 1, 1)
         price_grid.addWidget(pdf_edit_btn, 1, 2,
                              Qt.AlignmentFlag.AlignRight)
-        price_grid.addWidget(price_reset_btn, 2, 2,
+        price_grid.addWidget(QLabel("汇率 (USD→CNY)"), 2, 0)
+        price_grid.addWidget(self.rate_spin, 2, 1)
+        price_grid.addWidget(price_reset_btn, 3, 2,
                              Qt.AlignmentFlag.AlignRight)
 
         price_layout = QVBoxLayout(price_box)
         price_layout.setContentsMargins(10, 14, 10, 10)
         price_layout.setSpacing(8)
-        price_layout.addWidget(price_intro)
         price_layout.addLayout(price_grid)
 
         # ---- WebDAV group ----
@@ -179,14 +155,14 @@ class SettingsDialog(QDialog):
         self.wd_url_edit = QLineEdit(wd["url"])
         self.wd_url_edit.setPlaceholderText("https://example.com/dav")
         self.wd_user_edit = QLineEdit(wd["user"])
-        self.wd_user_edit.setPlaceholderText("用户名")
         self.wd_pass_edit = QLineEdit(wd["password"])
         self.wd_pass_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.wd_pass_edit.setPlaceholderText("密码")
         self._show_wdpass_btn = QPushButton("显示")
         self._show_wdpass_btn.setCheckable(True)
         self._show_wdpass_btn.setFixedWidth(64)
-        self._show_wdpass_btn.toggled.connect(self._toggle_wdpass_visible)
+        self._show_wdpass_btn.toggled.connect(
+            lambda on: self._toggle_echo(
+                self.wd_pass_edit, self._show_wdpass_btn, on))
         wdpass_row = QHBoxLayout()
         wdpass_row.addWidget(self.wd_pass_edit, 1)
         wdpass_row.addWidget(self._show_wdpass_btn)
@@ -200,11 +176,6 @@ class SettingsDialog(QDialog):
         self.wd_interval_spin.setSuffix(" 分钟")
         self.wd_interval_spin.setSpecialValueText("0 (不启用定时)")
         self.wd_interval_spin.setValue(int(wd["interval"]))
-        interval_hint = QLabel("启动 / 退出时各自动同步一次。")
-        interval_hint.setProperty("role", "muted")
-        interval_row = QHBoxLayout()
-        interval_row.addWidget(self.wd_interval_spin)
-        interval_row.addWidget(interval_hint, 1)
 
         wd_form = QFormLayout()
         wd_form.setSpacing(8)
@@ -212,7 +183,7 @@ class SettingsDialog(QDialog):
         wd_form.addRow("用户名", self.wd_user_edit)
         wd_form.addRow("密码", wdpass_row)
         wd_form.addRow("远程路径", self.wd_path_edit)
-        wd_form.addRow("同步间隔", interval_row)
+        wd_form.addRow("同步间隔", self.wd_interval_spin)
 
         self.wd_test_btn = QPushButton("测试连接")
         self.wd_test_btn.setIcon(icon("sync"))
@@ -222,7 +193,7 @@ class SettingsDialog(QDialog):
         self.wd_sync_btn.setIcon(icon("sync", ACCENT))
         self.wd_sync_btn.setIconSize(QSize(16, 16))
         self.wd_sync_btn.clicked.connect(self._sync_webdav)
-        self.wd_status = QLabel(_format_synced(config.get_last_synced()))
+        self.wd_status = QLabel(format_synced(config.get_last_synced()))
         self.wd_status.setProperty("role", "muted")
 
         wd_btn_row = QHBoxLayout()
@@ -246,8 +217,6 @@ class SettingsDialog(QDialog):
         self.cache_retention_spin.setSpecialValueText("0 (不自动清理)")
         self.cache_retention_spin.setValue(int(
             all_settings.get("cache_retention_days", 0) or 0))
-        cache_hint = QLabel("启动时自动清理超过此天数的截图历史和用量记录。")
-        cache_hint.setProperty("role", "muted")
         cache_now_btn = QPushButton("立即清理")
         cache_now_btn.setIcon(icon("trash"))
         cache_now_btn.setIconSize(QSize(16, 16))
@@ -267,7 +236,6 @@ class SettingsDialog(QDialog):
         cache_layout = QVBoxLayout(cache_box)
         cache_layout.setContentsMargins(10, 14, 10, 10)
         cache_layout.setSpacing(8)
-        cache_layout.addWidget(cache_hint)
         cache_layout.addLayout(cache_form)
         cache_layout.addLayout(cache_btn_row)
         cache_layout.addWidget(self.cache_status)
@@ -301,8 +269,6 @@ class SettingsDialog(QDialog):
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(10)
-        content_layout.addWidget(header)
-        content_layout.addWidget(intro)
         content_layout.addWidget(api_box)
         content_layout.addWidget(hk_box)
         content_layout.addWidget(price_box)
@@ -323,25 +289,15 @@ class SettingsDialog(QDialog):
 
     # ---- handlers ----------------------------------------------------------
 
-    def _toggle_key_visible(self, on: bool) -> None:
-        self.key_edit.setEchoMode(
-            QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password
-        )
-        self._show_key_btn.setText("隐藏" if on else "显示")
-
-    def _toggle_wdpass_visible(self, on: bool) -> None:
-        self.wd_pass_edit.setEchoMode(
-            QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password
-        )
-        self._show_wdpass_btn.setText("隐藏" if on else "显示")
+    @staticmethod
+    def _toggle_echo(edit: QLineEdit, btn: QPushButton, on: bool) -> None:
+        edit.setEchoMode(
+            QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password)
+        btn.setText("隐藏" if on else "显示")
 
     def _reset_hotkey(self) -> None:
         self.hotkey_edit.setKeySequence(
             QKeySequence(config.keyboard_to_qt(config.DEFAULT_HOTKEY)))
-
-    @staticmethod
-    def _fmt_price(value: float) -> str:
-        return f"${value:.4f}"
 
     def _edit_price(self, kind: str) -> None:
         if kind == "image":
@@ -361,10 +317,12 @@ class SettingsDialog(QDialog):
             return
         if kind == "image":
             self._pending_image_price = float(new_value)
-            self.image_price_label.setText(self._fmt_price(new_value))
+            self.image_price_label.setText(
+                format_unit_price(new_value, cny=False))
         else:
             self._pending_pdf_price = float(new_value)
-            self.pdf_price_label.setText(self._fmt_price(new_value))
+            self.pdf_price_label.setText(
+                format_unit_price(new_value, cny=False))
 
     def _reset_prices(self) -> None:
         ret = QMessageBox.question(
@@ -374,8 +332,10 @@ class SettingsDialog(QDialog):
             return
         self._pending_image_price = config.DEFAULT_IMAGE_PRICE
         self._pending_pdf_price = config.DEFAULT_PDF_PRICE
-        self.image_price_label.setText(self._fmt_price(self._pending_image_price))
-        self.pdf_price_label.setText(self._fmt_price(self._pending_pdf_price))
+        self.image_price_label.setText(
+            format_unit_price(self._pending_image_price, cny=False))
+        self.pdf_price_label.setText(
+            format_unit_price(self._pending_pdf_price, cny=False))
 
     def _test_webdav(self) -> None:
         url = self.wd_url_edit.text().strip()
@@ -397,27 +357,21 @@ class SettingsDialog(QDialog):
         if not url or not user:
             QMessageBox.warning(self, "缺少字段", "请先填写 URL 和用户名。")
             return
-        # Persist current WebDAV config so the worker reads the right values.
-        try:
-            config.set_webdav(url, user, pw, path,
-                              int(self.wd_interval_spin.value()))
-        except Exception as exc:
-            QMessageBox.critical(self, "保存失败", f"无法写入配置：{exc}")
-            return
 
         self.wd_sync_btn.setEnabled(False)
         self.wd_sync_btn.setText("同步中…")
         self.wd_status.setText("同步中…")
 
-        w = webdav.WebDavSyncWorker()
-        w.finished_ok.connect(self._on_sync_ok)
-        w.failed.connect(self._on_sync_fail)
-        w.finished.connect(self._sync_cleanup)
-        self._sync_worker = w
-        w.start()
+        # Pass the form values directly — nothing is persisted until 保存,
+        # so cancelling the dialog leaves the stored WebDAV config untouched.
+        wd = {"url": url, "user": user, "password": pw, "path": path,
+              "interval": 0}
+        self._sync_worker = webdav.start_worker(
+            on_ok=self._on_sync_ok, on_fail=self._on_sync_fail,
+            on_finished=self._sync_cleanup, wd=wd)
 
     def _on_sync_ok(self, ts: float) -> None:
-        self.wd_status.setText("✓ " + _format_synced(ts))
+        self.wd_status.setText("✓ " + format_synced(ts))
         # Refresh local field values from the merged result.
         s = config.load_all()
         self.id_edit.setText(s.get("app_id", ""))
@@ -427,9 +381,11 @@ class SettingsDialog(QDialog):
         self._pending_pdf_price = float(s.get(
             "pdf_price_usd", config.DEFAULT_PDF_PRICE))
         self.image_price_label.setText(
-            self._fmt_price(self._pending_image_price))
+            format_unit_price(self._pending_image_price, cny=False))
         self.pdf_price_label.setText(
-            self._fmt_price(self._pending_pdf_price))
+            format_unit_price(self._pending_pdf_price, cny=False))
+        self.rate_spin.setValue(float(s.get(
+            "usd_cny_rate", config.DEFAULT_USD_CNY_RATE)))
 
     def _on_sync_fail(self, msg: str) -> None:
         self.wd_status.setText(f"✗ 同步失败: {msg}")
@@ -443,8 +399,7 @@ class SettingsDialog(QDialog):
         days = int(self.cache_retention_spin.value())
         if days <= 0:
             QMessageBox.information(
-                self, "未设置保留天数",
-                "请先填入保留天数 (大于 0),或在「历史记录」标签页用「清空缓存」全量清理。")
+                self, "未设置保留天数", "请先填入保留天数 (大于 0)。")
             return
         if self._on_purge_now is None:
             self.cache_status.setText("✗ 当前无法清理 (storage 未连接)")
@@ -492,16 +447,21 @@ class SettingsDialog(QDialog):
         if wd_url and not wd_user:
             QMessageBox.warning(
                 self, "WebDAV 配置不完整",
-                "填写 WebDAV URL 后必须同时提供用户名（密码可空，但通常必填）。")
+                "填写 WebDAV URL 后必须同时提供用户名。")
             return
 
         try:
             cur = config.load_all()
-            cur["app_id"] = app_id
-            cur["app_key"] = app_key
+            # Stamp settings_modified_at when a last-write-wins synced field
+            # changes, so WebDAV merge knows this side is fresher.
+            lww = {"app_id": app_id, "app_key": app_key,
+                   "image_price_usd": float(self._pending_image_price),
+                   "pdf_price_usd": float(self._pending_pdf_price),
+                   "usd_cny_rate": float(self.rate_spin.value())}
+            if any(cur.get(k) != v for k, v in lww.items()):
+                cur["settings_modified_at"] = time.time()
+            cur.update(lww)  # type: ignore[typeddict-item]
             cur["hotkey"] = new_hotkey
-            cur["image_price_usd"] = float(self._pending_image_price)
-            cur["pdf_price_usd"] = float(self._pending_pdf_price)
             cur["webdav_url"] = wd_url
             cur["webdav_user"] = wd_user
             cur["webdav_password"] = self.wd_pass_edit.text()
@@ -522,7 +482,7 @@ class SettingsDialog(QDialog):
 
     def _clear(self) -> None:
         ret = QMessageBox.question(
-            self, "确认", "清除已保存的 API 凭证?其他设置不受影响。")
+            self, "确认", "清除已保存的 API 凭证?")
         if ret == QMessageBox.StandardButton.Yes:
             cur = config.load_all()
             cur.pop("app_id", None)

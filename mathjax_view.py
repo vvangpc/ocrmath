@@ -297,9 +297,7 @@ if WEBENGINE_AVAILABLE:
         def _on_download_fail(self, msg: str) -> None:
             self._downloader = None
             sys.stderr.write(f"MathJax download failed: {msg}\n")
-            self._load_placeholder(
-                f"⚠ MathJax 下载失败: {msg}<br>"
-                "请检查网络后重新打开此窗口，或离线时仅复制 LaTeX 源码。")
+            self._load_placeholder(f"⚠ MathJax 下载失败: {msg}")
 
         def _on_load_finished(self, ok: bool) -> None:
             self._page_loaded = bool(ok)

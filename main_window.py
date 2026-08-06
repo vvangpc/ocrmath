@@ -8,7 +8,7 @@ from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import (
     QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QFrame,
+    QPushButton, QFrame, QScrollArea,
 )
 
 import config
@@ -17,16 +17,7 @@ from pdf_panel import PdfPanel
 from storage import Recognition, Storage
 from styles import ACCENT, MUTED
 from ui_icons import icon
-
-
-def _format_synced(ts: float) -> str:
-    if not ts:
-        return "上次同步: —"
-    try:
-        dt = datetime.fromtimestamp(ts)
-    except Exception:
-        return "上次同步: —"
-    return "上次同步: " + dt.strftime("%Y-%m-%d %H:%M")
+from ui_utils import format_cost, format_synced, format_unit_price
 
 
 def _start_of_today() -> float:
@@ -50,7 +41,7 @@ class MainWindow(QMainWindow):
                  on_sync_now: Callable[[], None] | None = None):
         super().__init__()
         self.setWindowTitle("ocrmath - Mathpix OCR 工具")
-        self.resize(700, 800)
+        self.resize(480, 560)
         self._on_snip = on_snip
         self._on_open_settings = on_open_settings
         self._on_sync_now = on_sync_now
@@ -62,17 +53,24 @@ class MainWindow(QMainWindow):
                                   on_pages_processed=self._on_pages_processed)
         self.history_panel = HistoryPanel(storage, on_open=on_open_history)
 
+        # Scroll wrapper keeps the taller PDF panel from dictating the
+        # window's minimum size — the compact snip tab sets it instead.
+        pdf_scroll = QScrollArea()
+        pdf_scroll.setWidget(self.pdf_panel)
+        pdf_scroll.setWidgetResizable(True)
+        pdf_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+
         tabs = QTabWidget()
         tabs.setIconSize(QSize(18, 18))
         tabs.addTab(self.snip_tab, icon("snip", ACCENT), "  截屏识别  ")
-        tabs.addTab(self.pdf_panel, icon("pdf", ACCENT), "  PDF 转换  ")
+        tabs.addTab(pdf_scroll, icon("pdf", ACCENT), "  PDF 转换  ")
         tabs.addTab(self.history_panel, icon("history", ACCENT), "  历史记录  ")
         tabs.currentChanged.connect(self._on_tab_changed)
         self._tabs = tabs
 
         wrap = QWidget()
         wlay = QVBoxLayout(wrap)
-        wlay.setContentsMargins(12, 12, 12, 12)
+        wlay.setContentsMargins(8, 8, 8, 8)
         wlay.addWidget(tabs)
         self.setCentralWidget(wrap)
 
@@ -82,18 +80,8 @@ class MainWindow(QMainWindow):
     def _build_snip_tab(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
-        layout.setSpacing(14)
-        layout.setContentsMargins(20, 20, 20, 20)
-
-        title = QLabel("截屏公式识别")
-        title.setProperty("role", "heading")
-        layout.addWidget(title)
-
-        subtitle = QLabel("用全局快捷键唤起截屏,识别公式并复制到剪贴板。"
-                          "相同图像命中本地缓存。")
-        subtitle.setProperty("role", "muted")
-        subtitle.setWordWrap(True)
-        layout.addWidget(subtitle)
+        layout.setSpacing(10)
+        layout.setContentsMargins(14, 14, 14, 14)
 
         # Hotkey card
         card = QFrame()
@@ -108,45 +96,19 @@ class MainWindow(QMainWindow):
             f"font-family: 'Consolas', monospace; font-size: 13pt;"
             f"font-weight: 600; color: {ACCENT};"
         )
-        change_btn = QPushButton("修改…")
-        change_btn.setIcon(icon("settings"))
-        change_btn.setIconSize(QSize(16, 16))
-        change_btn.setFixedWidth(80)
-        change_btn.clicked.connect(self._on_open_settings)
 
         card_l.addWidget(hk_left)
         card_l.addWidget(self.hotkey_label, 1)
-        card_l.addWidget(change_btn)
         layout.addWidget(card)
 
         snip_btn = QPushButton("立即截屏识别")
         snip_btn.setObjectName("accent")
         snip_btn.setIcon(icon("snip", "white"))
         snip_btn.setIconSize(QSize(22, 22))
-        snip_btn.setMinimumHeight(48)
+        snip_btn.setMinimumHeight(42)
         snip_btn.setStyleSheet("font-size: 12pt;")
         snip_btn.clicked.connect(self._on_snip)
         layout.addWidget(snip_btn)
-
-        # Steps card
-        steps = QFrame()
-        steps.setProperty("card", "true")
-        steps_l = QVBoxLayout(steps)
-        steps_l.setContentsMargins(16, 12, 16, 12)
-        steps_l.setSpacing(6)
-        head = QLabel("使用步骤")
-        head.setProperty("role", "subheading")
-        steps_l.addWidget(head)
-        for line in [
-            "1. 按下全局快捷键（或点击上方按钮）",
-            "2. 屏幕变暗后用鼠标拖拽圈选公式区域",
-            "3. 等待识别（约 1-2 秒），结果窗口弹出",
-            "4. 点击行内 / 独立 LaTeX 旁的「复制」即可粘贴",
-        ]:
-            lbl = QLabel(line)
-            lbl.setStyleSheet(f"color: {MUTED};")
-            steps_l.addWidget(lbl)
-        layout.addWidget(steps)
 
         # Stats card
         layout.addWidget(self._build_stats_card())
@@ -161,7 +123,7 @@ class MainWindow(QMainWindow):
         bottom.addWidget(settings_btn)
         bottom.addStretch(1)
 
-        self.cost_hint = QLabel("$0.002/张 · $0.005/页")
+        self.cost_hint = QLabel("")
         self.cost_hint.setProperty("role", "muted")
         bottom.addWidget(self.cost_hint)
         layout.addLayout(bottom)
@@ -182,16 +144,16 @@ class MainWindow(QMainWindow):
         tiles.setSpacing(12)
         self.stat_image_value = self._build_stat_value("0 次")
         self.stat_pdf_value = self._build_stat_value("0 页")
-        self.stat_cost_value = self._build_stat_value("$0.000")
+        self.stat_cost_value = self._build_stat_value("")
         tiles.addLayout(self._wrap_tile(self.stat_image_value, "截图识别"), 1)
         tiles.addLayout(self._wrap_tile(self.stat_pdf_value, "PDF 转换"), 1)
         tiles.addLayout(self._wrap_tile(self.stat_cost_value, "累计花费"), 1)
         outer.addLayout(tiles)
 
-        self.period_summary_label = QLabel("本月: $0.000 (0 张 · 0 页)  ·  "
-                                            "今日: $0.000 (0 张 · 0 页)")
+        self.period_summary_label = QLabel("")
         self.period_summary_label.setProperty("role", "muted")
         self.period_summary_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.period_summary_label.setWordWrap(True)
         outer.addWidget(self.period_summary_label)
 
         actions = QHBoxLayout()
@@ -212,7 +174,7 @@ class MainWindow(QMainWindow):
         actions.addWidget(sync_btn)
         outer.addLayout(actions)
 
-        self.last_synced_label = QLabel(_format_synced(0))
+        self.last_synced_label = QLabel(format_synced(0))
         self.last_synced_label.setProperty("role", "muted")
         outer.addWidget(self.last_synced_label)
 
@@ -222,7 +184,7 @@ class MainWindow(QMainWindow):
         lbl = QLabel(text)
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lbl.setStyleSheet(
-            f"font-size: 18pt; font-weight: 700; color: {ACCENT};")
+            f"font-size: 13pt; font-weight: 700; color: {ACCENT};")
         return lbl
 
     def _wrap_tile(self, value_label: QLabel, caption: str) -> QVBoxLayout:
@@ -248,9 +210,11 @@ class MainWindow(QMainWindow):
         cost = img_n * ip + pdf_n * pp
         self.stat_image_value.setText(f"{img_n} 次")
         self.stat_pdf_value.setText(f"{pdf_n} 页")
-        self.stat_cost_value.setText(f"${cost:.3f}")
-        self.cost_hint.setText(f"${ip:.3f}/张 · ${pp:.3f}/页")
-        self.last_synced_label.setText(_format_synced(config.get_last_synced()))
+        self.stat_cost_value.setText(format_cost(cost))
+        self.cost_hint.setText(
+            f"{format_unit_price(ip, cny=False)}/张 · "
+            f"{format_unit_price(pp, cny=False)}/页")
+        self.last_synced_label.setText(format_synced(config.get_last_synced()))
         self._refresh_period_summary()
         try:
             self.pdf_panel.refresh_price_display()
@@ -264,10 +228,10 @@ class MainWindow(QMainWindow):
         except Exception:
             return
         self.period_summary_label.setText(
-            f"本月: ${month['total_cost']:.3f} "
+            f"本月: {format_cost(month['total_cost'])} "
             f"({month['image_count']} 张 · {month['pdf_pages']} 页)"
             f"  ·  "
-            f"今日: ${today['total_cost']:.3f} "
+            f"今日: {format_cost(today['total_cost'])} "
             f"({today['image_count']} 张 · {today['pdf_pages']} 页)")
 
     def on_counters_changed(self) -> None:

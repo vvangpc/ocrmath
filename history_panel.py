@@ -232,7 +232,9 @@ class HistoryPanel(QWidget):
                                   [r.image_sha256 for r in recs],
                                   self._generation, self)
             loader.thumbnail_ready.connect(self._on_thumbnail_ready)
-            loader.finished.connect(loader.deleteLater)
+            # Drop our reference before deleteLater destroys the C++ object,
+            # otherwise the next refresh calls isRunning() on a dead wrapper.
+            loader.finished.connect(lambda: self._on_loader_finished(loader))
             self._thumb_loader = loader
             loader.start()
 
@@ -245,6 +247,11 @@ class HistoryPanel(QWidget):
         )
 
     # ---- internal ----------------------------------------------------------
+
+    def _on_loader_finished(self, loader: _ThumbLoader) -> None:
+        if self._thumb_loader is loader:
+            self._thumb_loader = None
+        loader.deleteLater()
 
     def _on_thumbnail_ready(self, generation: int, sha: str,
                             img: QImage) -> None:
@@ -279,7 +286,7 @@ class HistoryPanel(QWidget):
             return
         ret = QMessageBox.warning(
             self, "确认清空缓存",
-            f"将永久删除 {n} 条记录和图像缓存,被删除的图像再次截屏会重新调用 API。继续?",
+            f"将永久删除 {n} 条记录和图像缓存（费用统计保留）。继续?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )

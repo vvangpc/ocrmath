@@ -7,7 +7,6 @@ from PyQt6.QtGui import (
     QPen, QPixmap,
 )
 
-PRIMARY = "#ff6a00"
 INK = "#263238"
 
 # Icons are immutable once drawn; cache them so repeated icon() calls during

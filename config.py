@@ -6,9 +6,10 @@ Windows-first, the fallback is just to keep dev tools usable on other OSes.
 
 Stored fields:
     app_id, app_key (required), hotkey (optional),
-    image_count, pdf_page_count, image_price_usd, pdf_price_usd,
+    image_count, pdf_page_count, image_price_usd, pdf_price_usd, usd_cny_rate,
     webdav_url, webdav_user, webdav_password, webdav_path,
-    webdav_auto_sync, last_synced_at
+    webdav_sync_interval, cache_retention_days, usage_backfilled,
+    settings_modified_at, last_synced_at
 """
 from __future__ import annotations
 
@@ -16,12 +17,14 @@ import json
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import TypedDict
 
 DEFAULT_HOTKEY = "ctrl+alt+m"
 DEFAULT_IMAGE_PRICE = 0.002
 DEFAULT_PDF_PRICE = 0.005
+DEFAULT_USD_CNY_RATE = 7.0
 DEFAULT_WEBDAV_PATH = "/ocrmath/sync.json"
 
 # Guards read-modify-write cycles for counter bumps and sync writes.
@@ -36,6 +39,7 @@ class Settings(TypedDict, total=False):
     pdf_page_count: int
     image_price_usd: float
     pdf_price_usd: float
+    usd_cny_rate: float            # display conversion, USD -> CNY
     webdav_url: str
     webdav_user: str
     webdav_password: str
@@ -43,6 +47,7 @@ class Settings(TypedDict, total=False):
     webdav_sync_interval: int      # minutes; 0 = no periodic timer
     cache_retention_days: int      # 0 = no auto-purge
     usage_backfilled: bool         # one-shot migration guard
+    settings_modified_at: float    # last local edit of syncable settings
     last_synced_at: float
 
 
@@ -122,15 +127,26 @@ _STR_KEYS = ("app_id", "app_key", "hotkey",
              "webdav_url", "webdav_user", "webdav_password", "webdav_path")
 _INT_KEYS = ("image_count", "pdf_page_count",
              "webdav_sync_interval", "cache_retention_days")
-_FLOAT_KEYS = ("image_price_usd", "pdf_price_usd", "last_synced_at")
+_FLOAT_KEYS = ("image_price_usd", "pdf_price_usd", "usd_cny_rate",
+               "settings_modified_at", "last_synced_at")
 _BOOL_KEYS: tuple[str, ...] = ("usage_backfilled",)
+
+
+# Parsed-settings cache keyed by the decrypted blob object (identity): while
+# _BLOB_CACHE is valid, _read_blob returns the same bytes object, so `is`
+# comparison is both cheap and race-free.
+_SETTINGS_CACHE: tuple[bytes, Settings] | None = None
 
 
 def load_all() -> Settings:
     """Return everything stored, or {} if no config / corrupt."""
+    global _SETTINGS_CACHE
     blob = _read_blob()
     if blob is None:
         return {}
+    cached = _SETTINGS_CACHE
+    if cached is not None and cached[0] is blob:
+        return dict(cached[1])  # shallow copy: callers mutate the result
     try:
         data = json.loads(blob.decode())
     except Exception:
@@ -150,6 +166,7 @@ def load_all() -> Settings:
     for k in _BOOL_KEYS:
         if k in data and isinstance(data[k], bool):
             out[k] = data[k]  # type: ignore[literal-required]
+    _SETTINGS_CACHE = (blob, dict(out))
     return out
 
 
@@ -170,6 +187,8 @@ def save(app_id: str, app_key: str) -> None:
     """Backward-compat: preserves any existing hotkey."""
     with _LOCK:
         cur = load_all()
+        if cur.get("app_id") != app_id or cur.get("app_key") != app_key:
+            cur["settings_modified_at"] = time.time()
         cur["app_id"] = app_id
         cur["app_key"] = app_key
         save_all(cur)
@@ -201,12 +220,9 @@ def get_pdf_price() -> float:
     return float(load_all().get("pdf_price_usd", DEFAULT_PDF_PRICE))
 
 
-def set_prices(image_usd: float, pdf_usd: float) -> None:
-    with _LOCK:
-        cur = load_all()
-        cur["image_price_usd"] = float(image_usd)
-        cur["pdf_price_usd"] = float(pdf_usd)
-        save_all(cur)
+def get_usd_cny_rate() -> float:
+    return float(load_all().get("usd_cny_rate", DEFAULT_USD_CNY_RATE)) \
+        or DEFAULT_USD_CNY_RATE
 
 
 # ---- counters --------------------------------------------------------------
@@ -245,28 +261,9 @@ def get_webdav() -> dict:
     }
 
 
-def set_webdav(url: str, user: str, password: str, path: str,
-               sync_interval: int) -> None:
-    with _LOCK:
-        cur = load_all()
-        cur["webdav_url"] = url
-        cur["webdav_user"] = user
-        cur["webdav_password"] = password
-        cur["webdav_path"] = path or DEFAULT_WEBDAV_PATH
-        cur["webdav_sync_interval"] = max(0, int(sync_interval))
-        save_all(cur)
-
-
 def get_cache_retention() -> int:
     """Return the cache retention in days. 0 = disabled (no auto-purge)."""
     return int(load_all().get("cache_retention_days", 0) or 0)
-
-
-def set_cache_retention(days: int) -> None:
-    with _LOCK:
-        cur = load_all()
-        cur["cache_retention_days"] = max(0, int(days))
-        save_all(cur)
 
 
 def is_usage_backfilled() -> bool:
@@ -284,18 +281,20 @@ def get_last_synced() -> float:
     return float(load_all().get("last_synced_at", 0.0) or 0.0)
 
 
-def set_last_synced(ts: float) -> None:
-    with _LOCK:
-        cur = load_all()
-        cur["last_synced_at"] = float(ts)
-        save_all(cur)
+def get_modified_at() -> float:
+    """Last local edit of syncable settings (creds / prices / rate).
+    Old configs without the field fall back to last_synced_at so merge
+    behaviour matches the previous release."""
+    s = load_all()
+    return float(s.get("settings_modified_at",
+                       s.get("last_synced_at", 0.0)) or 0.0)
 
 
 # ---- sync payload ----------------------------------------------------------
 
 _SYNCABLE_KEYS = ("app_id", "app_key",
                   "image_count", "pdf_page_count",
-                  "image_price_usd", "pdf_price_usd")
+                  "image_price_usd", "pdf_price_usd", "usd_cny_rate")
 
 
 def get_syncable_payload() -> dict:
@@ -309,6 +308,7 @@ def get_syncable_payload() -> dict:
     out.setdefault("pdf_page_count", 0)
     out.setdefault("image_price_usd", DEFAULT_IMAGE_PRICE)
     out.setdefault("pdf_price_usd", DEFAULT_PDF_PRICE)
+    out.setdefault("usd_cny_rate", DEFAULT_USD_CNY_RATE)
     return out
 
 

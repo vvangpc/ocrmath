@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS usage (
     created_at  REAL    NOT NULL,
     kind        TEXT    NOT NULL,    -- 'image' or 'pdf'
     count       INTEGER NOT NULL,    -- 1 for image, page_count for PDF
-    cost_usd    REAL    NOT NULL     -- frozen at event time
+    cost_usd    REAL    NOT NULL,    -- frozen at event time
+    source      TEXT    NOT NULL DEFAULT 'live'  -- 'live' or 'backfill'
 );
 CREATE INDEX IF NOT EXISTS idx_usage_created ON usage(created_at);
 """
@@ -84,25 +85,29 @@ class Storage:
     # ---- helpers -----------------------------------------------------------
 
     def _migrate(self) -> None:
-        """Upgrade databases created before the png_size column existed."""
+        """Upgrade databases created before newer columns existed."""
         cols = {r[1] for r in self._conn.execute(
             "PRAGMA table_info(recognitions)")}
-        if "png_size" in cols:
-            return
-        self._conn.execute(
-            "ALTER TABLE recognitions "
-            "ADD COLUMN png_size INTEGER NOT NULL DEFAULT 0")
-        # One-time backfill from files on disk so stats() can rely on the DB.
-        rows = self._conn.execute(
-            "SELECT id, image_sha256 FROM recognitions").fetchall()
-        for row in rows:
-            try:
-                size = self._png_path(row["image_sha256"]).stat().st_size
-            except OSError:
-                size = 0
+        if "png_size" not in cols:
             self._conn.execute(
-                "UPDATE recognitions SET png_size = ? WHERE id = ?",
-                (size, row["id"]))
+                "ALTER TABLE recognitions "
+                "ADD COLUMN png_size INTEGER NOT NULL DEFAULT 0")
+            # One-time backfill from disk so stats() can rely on the DB.
+            rows = self._conn.execute(
+                "SELECT id, image_sha256 FROM recognitions").fetchall()
+            for row in rows:
+                try:
+                    size = self._png_path(row["image_sha256"]).stat().st_size
+                except OSError:
+                    size = 0
+                self._conn.execute(
+                    "UPDATE recognitions SET png_size = ? WHERE id = ?",
+                    (size, row["id"]))
+        ucols = {r[1] for r in self._conn.execute("PRAGMA table_info(usage)")}
+        if "source" not in ucols:
+            self._conn.execute(
+                "ALTER TABLE usage "
+                "ADD COLUMN source TEXT NOT NULL DEFAULT 'live'")
         self._conn.commit()
 
     def _png_path(self, sha: str) -> Path:
@@ -197,10 +202,12 @@ class Storage:
     def list_recent(self, query: str = "", limit: int = 200) -> list[Recognition]:
         with self._lock:
             if query:
-                pat = f"%{query}%"
+                esc = (query.replace("\\", "\\\\")
+                       .replace("%", "\\%").replace("_", "\\_"))
+                pat = f"%{esc}%"
                 cur = self._conn.execute(
                     "SELECT * FROM recognitions "
-                    "WHERE text LIKE ? OR latex LIKE ? "
+                    "WHERE text LIKE ? ESCAPE '\\' OR latex LIKE ? ESCAPE '\\' "
                     "ORDER BY created_at DESC LIMIT ?",
                     (pat, pat, limit),
                 )
@@ -211,13 +218,6 @@ class Storage:
                 )
             rows = cur.fetchall()
         return [self._row_to_recognition(r) for r in rows]
-
-    def get(self, rec_id: int) -> Recognition | None:
-        with self._lock:
-            cur = self._conn.execute(
-                "SELECT * FROM recognitions WHERE id = ?", (rec_id,))
-            row = cur.fetchone()
-        return self._row_to_recognition(row) if row else None
 
     def delete(self, rec_id: int) -> None:
         with self._lock:
@@ -244,8 +244,8 @@ class Storage:
         cost = float(count) * float(unit_price_usd)
         with self._lock:
             self._conn.execute(
-                "INSERT INTO usage (created_at, kind, count, cost_usd) "
-                "VALUES (?, ?, ?, ?)",
+                "INSERT INTO usage (created_at, kind, count, cost_usd, source) "
+                "VALUES (?, ?, ?, ?, 'live')",
                 (time.time(), kind, int(count), cost),
             )
             self._conn.commit()
@@ -278,18 +278,31 @@ class Storage:
         For users who recognized images before the `usage` table existed.
         Each recognition row → one image event with the given unit price
         (we have to assume the current price; the historical one is unknown).
-        Caller is responsible for guarding against double-runs (use
-        `config.usage_backfilled` flag)."""
+        Idempotent regardless of the config-side flag: skips if backfill rows
+        already exist, and only fills recognitions older than the earliest
+        live image event (newer ones were logged in real time)."""
         with self._lock:
-            cur = self._conn.execute(
-                "SELECT created_at FROM recognitions ORDER BY created_at")
+            if self._conn.execute(
+                    "SELECT 1 FROM usage WHERE source = 'backfill' LIMIT 1"
+                    ).fetchone():
+                return 0
+            row = self._conn.execute(
+                "SELECT MIN(created_at) AS m FROM usage WHERE kind = 'image'"
+                ).fetchone()
+            if row["m"] is None:
+                cur = self._conn.execute(
+                    "SELECT created_at FROM recognitions ORDER BY created_at")
+            else:
+                cur = self._conn.execute(
+                    "SELECT created_at FROM recognitions "
+                    "WHERE created_at < ? ORDER BY created_at", (row["m"],))
             timestamps = [r["created_at"] for r in cur.fetchall()]
             if not timestamps:
                 return 0
             cost = float(unit_price_usd)
             self._conn.executemany(
-                "INSERT INTO usage (created_at, kind, count, cost_usd) "
-                "VALUES (?, 'image', 1, ?)",
+                "INSERT INTO usage (created_at, kind, count, cost_usd, source) "
+                "VALUES (?, 'image', 1, ?, 'backfill')",
                 [(ts, cost) for ts in timestamps],
             )
             self._conn.commit()
@@ -334,6 +347,8 @@ class Storage:
     # ---- bulk ops ----------------------------------------------------------
 
     def clear_all(self) -> None:
+        """Delete all recognitions + cached PNGs.
+        Usage/cost records are intentionally kept."""
         with self._lock:
             self._conn.execute("DELETE FROM recognitions")
             self._conn.commit()
@@ -419,6 +434,39 @@ def _selftest() -> int:
         # cache dir should have no png files
         pngs = list((Path(tmp) / "ocrmath" / "cache").glob("**/*.png"))
         assert pngs == [], f"expected empty cache, got {pngs}"
+        # LIKE wildcard escaping: % and _ match literally, not as wildcards
+        st.insert("d" * 64, b"png-d", {"text": "50% off", "latex_styled": ""})
+        st.insert("e" * 64, b"png-e", {"text": "a_b", "latex_styled": ""})
+        assert len(st.list_recent("%")) == 1
+        assert len(st.list_recent("_")) == 1
+        assert len(st.list_recent("50%")) == 1
+        # usage records survive clear_all
+        st.log_usage("image", 1, 0.002)
+        st.clear_all()
+        assert st.usage_summary(0)["image_count"] == 1
+        st.close()
+    # backfill idempotency: second run is a no-op
+    with tempfile.TemporaryDirectory() as tmp:
+        st = Storage(Path(tmp) / "ocrmath")
+        st.insert("a" * 64, b"p1", {"text": "x"})
+        st.insert("b" * 64, b"p2", {"text": "y"})
+        assert st.backfill_image_usage(0.002) == 2
+        assert st.backfill_image_usage(0.002) == 0
+        assert st.usage_summary(0)["image_count"] == 2
+        st.close()
+    # backfill guard 2: only recognitions older than the earliest live
+    # image event are filled (newer ones were logged in real time)
+    with tempfile.TemporaryDirectory() as tmp:
+        st = Storage(Path(tmp) / "ocrmath")
+        st.log_usage("image", 1, 0.002)
+        st._conn.execute(
+            "INSERT INTO recognitions (image_sha256, created_at, image_rel) "
+            "VALUES (?, ?, ?)", ("f" * 64, time.time() - 1000, "ff/old.png"))
+        st._conn.execute(
+            "INSERT INTO recognitions (image_sha256, created_at, image_rel) "
+            "VALUES (?, ?, ?)", ("0" * 64, time.time() + 10, "00/new.png"))
+        st._conn.commit()
+        assert st.backfill_image_usage(0.002) == 1
         st.close()
     # migration: a pre-png_size database gets the column backfilled from disk
     with tempfile.TemporaryDirectory() as tmp:
@@ -438,11 +486,22 @@ def _selftest() -> int:
         conn.execute(
             "INSERT INTO recognitions (image_sha256, created_at, image_rel) "
             "VALUES (?, ?, ?)", (sha, time.time(), f"{sha[:2]}/{sha}.png"))
+        # pre-`source` usage table gets the column added, old rows -> 'live'
+        conn.execute(
+            "CREATE TABLE usage ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, created_at REAL NOT NULL,"
+            "kind TEXT NOT NULL, count INTEGER NOT NULL,"
+            "cost_usd REAL NOT NULL)")
+        conn.execute(
+            "INSERT INTO usage (created_at, kind, count, cost_usd) "
+            "VALUES (?, 'image', 1, 0.002)", (time.time(),))
         conn.commit()
         conn.close()
         st = Storage(base)
         assert st.stats()["cache_bytes"] == len(b"\x89PNG old"), \
             f"migration backfill failed: {st.stats()}"
+        row = st._conn.execute("SELECT source FROM usage").fetchone()
+        assert row["source"] == "live", f"usage migration failed: {row}"
         st.close()
     print("OK")
     return 0

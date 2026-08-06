@@ -15,7 +15,6 @@ BORDER = "#dde3ea"
 BORDER_FOCUS = ACCENT
 BG = "#f6f8fb"
 SURFACE = "#ffffff"
-SURFACE_ALT = "#f1f4f8"
 WARNING_BG = "#fff3cd"
 WARNING_BORDER = "#ffeeba"
 WARNING_TEXT = "#7a5a00"

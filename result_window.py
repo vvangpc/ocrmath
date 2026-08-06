@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
 )
 
 from mathjax_view import MathJaxView, WEBENGINE_AVAILABLE
-from styles import ACCENT
+from styles import ACCENT, SUCCESS
 from ui_icons import icon
 
 
@@ -128,7 +128,7 @@ class ResultWindow(QWidget):
 
         bottom = QHBoxLayout()
         self.toast = QLabel("")
-        self.toast.setStyleSheet("color: #28a745; font-weight: 600;")
+        self.toast.setStyleSheet(f"color: {SUCCESS}; font-weight: 600;")
         bottom.addWidget(self.toast, 1)
 
         if self._on_recapture is not None:
@@ -178,7 +178,7 @@ class ResultWindow(QWidget):
 
         if confidence is not None and confidence < 0.5:
             self.warn.setText(
-                f"⚠ 置信度 {confidence * 100:.0f}%,建议截取更清晰的区域。")
+                f"⚠ 置信度 {confidence * 100:.0f}%。")
             self.warn.show()
         else:
             self.warn.hide()
@@ -205,7 +205,7 @@ class ResultWindow(QWidget):
         elif latex:
             content, is_math = latex, True
         elif text:
-            self._set_preview_message("(纯文本无需预览，直接在下方复制)")
+            self._set_preview_message("(纯文本)")
             return
         else:
             self._set_preview_message("(空结果)")
