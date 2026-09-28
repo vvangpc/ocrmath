@@ -9,8 +9,9 @@ Envelope on the wire:
 
 Conflict resolution (see merge()):
     counters: max(local, remote)              (offline accumulation safe)
-    creds + prices + rate: last-write-wins — remote side by its synced_at,
-    local side by settings_modified_at (when the user last edited them)
+    creds + prices + rate: last-write-wins by settings_modified_at (when the
+    user last edited them), carried inside `data`; remote files written by
+    older versions lack it and fall back to the envelope's synced_at
 """
 from __future__ import annotations
 
@@ -164,13 +165,14 @@ def merge(local_data: dict, local_ts: float,
                              int(remote_data.get("image_count", 0)))
     out["pdf_page_count"] = max(int(local_data.get("pdf_page_count", 0)),
                                 int(remote_data.get("pdf_page_count", 0)))
-    winner = remote_data if remote_ts > local_ts else local_data
-    for k in ("app_id", "app_key", "image_price_usd", "pdf_price_usd",
-              "usd_cny_rate"):
+    remote_wins = remote_ts > local_ts
+    winner = remote_data if remote_wins else local_data
+    for k in config.LWW_KEYS:
         if k in winner:
             out[k] = winner[k]
         elif k in local_data:
             out[k] = local_data[k]
+    out["settings_modified_at"] = remote_ts if remote_wins else local_ts
     return out
 
 
@@ -189,13 +191,19 @@ def sync_once(wd: dict | None = None) -> float:
         raise RuntimeError("另一次同步正在进行")
     try:
         local_data = config.get_syncable_payload()
-        local_ts = config.get_modified_at()
+        local_ts = float(local_data["settings_modified_at"])
 
         remote_env = download(wd["url"], wd["user"], wd["password"], wd["path"])
         if remote_env is not None and isinstance(remote_env.get("data"), dict):
+            remote_data = remote_env["data"]
+            # Compare edit time with edit time: the envelope's synced_at only
+            # says when some device last synced, so an untouched device
+            # syncing must not beat an older-but-unsynced local edit.
+            remote_ts = remote_data.get("settings_modified_at")
+            if not isinstance(remote_ts, (int, float)):
+                remote_ts = remote_env.get("synced_at", 0)
             merged = merge(local_data, local_ts,
-                           remote_env["data"],
-                           float(remote_env.get("synced_at", 0) or 0))
+                           remote_data, float(remote_ts or 0))
         else:
             merged = dict(local_data)
 
@@ -204,7 +212,7 @@ def sync_once(wd: dict | None = None) -> float:
         # show a bogus "synced" timestamp and skew last-write-wins merges.
         upload(wd["url"], wd["user"], wd["password"], wd["path"],
                {"version": 1, "synced_at": now, "data": merged})
-        config.apply_synced_payload(merged, now)
+        config.apply_synced_payload(merged, now, base_modified_at=local_ts)
         return now
     finally:
         _SYNC_LOCK.release()
@@ -216,7 +224,36 @@ def sync_once(wd: dict | None = None) -> float:
 # Keeps running workers alive even if their owner (e.g. a closed settings
 # dialog) drops the last reference — a QThread garbage-collected while its
 # thread is still running aborts the whole app.
-_ACTIVE_WORKERS: set["WebDavSyncWorker"] = set()
+_ACTIVE_WORKERS: set[QThread] = set()
+
+
+def _keep_alive(worker: QThread) -> None:
+    _ACTIVE_WORKERS.add(worker)
+    # Queued so the discard (possibly the last reference) runs on the
+    # main thread after the worker thread has fully wound down.
+    worker.finished.connect(lambda: _ACTIVE_WORKERS.discard(worker),
+                            Qt.ConnectionType.QueuedConnection)
+
+
+def any_running() -> bool:
+    return any(w.isRunning() for w in list(_ACTIVE_WORKERS))
+
+
+class ConnectionTestWorker(QThread):
+    """Runs test_connection() off the UI thread (it can block for 10s+)."""
+    done = pyqtSignal(bool, str)      # ok, message
+
+    def __init__(self, url: str, user: str, pw: str, parent=None):
+        super().__init__(parent)
+        self._args = (url, user, pw)
+        _keep_alive(self)
+
+    def run(self) -> None:
+        try:
+            ok, msg = test_connection(*self._args)
+        except Exception as exc:
+            ok, msg = False, str(exc)
+        self.done.emit(ok, msg)
 
 
 class WebDavSyncWorker(QThread):
@@ -226,11 +263,7 @@ class WebDavSyncWorker(QThread):
     def __init__(self, wd: dict | None = None, parent=None):
         super().__init__(parent)
         self._wd = wd
-        _ACTIVE_WORKERS.add(self)
-        # Queued so the discard (possibly the last reference) runs on the
-        # main thread after the worker thread has fully wound down.
-        self.finished.connect(lambda: _ACTIVE_WORKERS.discard(self),
-                              Qt.ConnectionType.QueuedConnection)
+        _keep_alive(self)
 
     def run(self) -> None:
         try:

@@ -310,7 +310,8 @@ class Storage:
 
     def purge_older_than(self, days: int) -> int:
         """Delete recognitions older than `days` days, plus their PNG files.
-        Returns the number of recognitions deleted."""
+        Usage/cost records are intentionally kept. Returns the number of
+        recognitions deleted."""
         if days <= 0:
             return 0
         cutoff = time.time() - days * 86400
@@ -332,17 +333,6 @@ class Storage:
             except Exception:
                 pass
         return len(shas)
-
-    def purge_old_usage(self, days: int) -> int:
-        """Drop usage events older than `days` days. Returns count deleted."""
-        if days <= 0:
-            return 0
-        cutoff = time.time() - days * 86400
-        with self._lock:
-            cur = self._conn.execute(
-                "DELETE FROM usage WHERE created_at < ?", (cutoff,))
-            self._conn.commit()
-            return cur.rowcount or 0
 
     # ---- bulk ops ----------------------------------------------------------
 

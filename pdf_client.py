@@ -13,6 +13,11 @@ from api_common import format_request_error
 
 API_BASE = "https://api.mathpix.com/v3/pdf"
 
+# Keep-alive session so the 2s status polls reuse one connection instead of
+# a TLS handshake each. PdfPanel runs one PdfWorker at a time, so no two
+# threads share it.
+_SESSION = requests.Session()
+
 # Upper bound on one format's streaming download; `timeout=` on requests.get
 # only bounds individual socket reads, not a server that drips bytes forever.
 DOWNLOAD_TOTAL_TIMEOUT_S = 600.0
@@ -60,7 +65,7 @@ def submit_file(pdf_path: Path, opts: PdfOptions, app_id: str, app_key: str,
         options_json["page_ranges"] = opts.page_ranges
 
     with open(pdf_path, "rb") as fh:
-        resp = requests.post(
+        resp = _SESSION.post(
             API_BASE,
             headers=_headers(app_id, app_key),
             files={"file": (pdf_path.name, fh, "application/pdf")},
@@ -79,7 +84,7 @@ def submit_file(pdf_path: Path, opts: PdfOptions, app_id: str, app_key: str,
 
 def get_status(pdf_id: str, app_id: str, app_key: str,
                timeout: int = 30) -> dict:
-    resp = requests.get(f"{API_BASE}/{pdf_id}",
+    resp = _SESSION.get(f"{API_BASE}/{pdf_id}",
                         headers=_headers(app_id, app_key), timeout=timeout)
     resp.raise_for_status()
     return resp.json()
@@ -89,7 +94,7 @@ def download(pdf_id: str, ext: str, dest: Path, app_id: str, app_key: str,
              timeout: int = 120) -> None:
     """ext is one of: mmd, docx, tex.zip, html, lines.json, pdf"""
     deadline = time.monotonic() + DOWNLOAD_TOTAL_TIMEOUT_S
-    with requests.get(f"{API_BASE}/{pdf_id}.{ext}",
+    with _SESSION.get(f"{API_BASE}/{pdf_id}.{ext}",
                       headers=_headers(app_id, app_key),
                       timeout=timeout, stream=True) as resp:
         resp.raise_for_status()
@@ -104,16 +109,27 @@ def download(pdf_id: str, ext: str, dest: Path, app_id: str, app_key: str,
                     fh.write(chunk)
 
 
+class _JobFailed(Exception):
+    """Ends the job with a user-facing message (cancel, stall, server error)."""
+
+
 class PdfWorker(QThread):
-    """Submit + poll + download all conversion formats."""
+    """Submit + poll + download all conversion formats.
+
+    Once the upload is accepted, Mathpix bills the conversion even if we stop
+    waiting for it, so every submitted job emits `billed` exactly once —
+    before finished_ok/failed — whatever the outcome."""
 
     progress = pyqtSignal(int, str)         # percent, status text
     log = pyqtSignal(str)                    # log line
-    finished_ok = pyqtSignal(list, int)      # saved files, pages processed (0 = unknown)
+    billed = pyqtSignal(int)                 # billable pages (0 = unknown)
+    finished_ok = pyqtSignal(list)           # saved files
     failed = pyqtSignal(str)
 
     POLL_INTERVAL_S = 2.0
-    POLL_TIMEOUT_S = 600.0
+    # Give up only when the job stops advancing for this long — a fixed
+    # overall deadline would abandon large PDFs that are still converting.
+    STALL_TIMEOUT_S = 600.0
 
     def __init__(self, pdf_path: Path, opts: PdfOptions, out_dir: Path,
                  app_id: str, app_key: str, parent=None):
@@ -123,32 +139,64 @@ class PdfWorker(QThread):
         self._out = out_dir
         self._id = app_id
         self._key = app_key
+        self._submitted = False
+        self._state = ""        # last status reported by the server
+        self._pages_done = 0    # num_pages_completed
+        self._pages_total = 0   # num_pages
 
     def cancel(self) -> None:
         self.requestInterruption()
 
     def run(self) -> None:
+        saved: list[Path] | None = None
+        error = ""
         try:
-            self._do_run()
+            saved = self._do_run()
+        except _JobFailed as exc:
+            error = str(exc)
         except Exception as exc:
-            self.failed.emit(format_request_error(exc))
+            error = format_request_error(exc)
+        if self._submitted:
+            self.billed.emit(self._billable_pages())
+        if saved is not None:
+            self.finished_ok.emit(saved)
+        else:
+            self.failed.emit(error)
 
-    def _do_run(self) -> None:
+    def _billable_pages(self) -> int:
+        if self._state == "completed":
+            # Pages completed honors page_ranges; fall back to the total.
+            return self._pages_done or self._pages_total
+        if self._state == "error":
+            return self._pages_done
+        # Abandoned mid-processing (cancel / stall / network error): the
+        # server keeps converting after we stop polling. Without a page range
+        # the whole document gets billed; with one, num_pages is the document
+        # total, so the pages done so far are the only figure we have.
+        if self._opts.page_ranges:
+            return self._pages_done
+        return self._pages_total or self._pages_done
+
+    def _check_cancel(self) -> None:
+        if self.isInterruptionRequested():
+            raise _JobFailed("Cancelled by user")
+
+    def _do_run(self) -> list[Path]:
         self.log.emit(f"Uploading {self._pdf.name}...")
         pdf_id = submit_file(self._pdf, self._opts, self._id, self._key)
+        self._submitted = True
         self.log.emit(f"pdf_id = {pdf_id}")
         self.progress.emit(0, "Submitted, processing...")
 
-        deadline = time.monotonic() + self.POLL_TIMEOUT_S
+        last_change = time.monotonic()
         last_status = ""
-        num_pages = 0  # actual pages processed, per the status endpoint
+        last_progress: tuple | None = None
         while True:
-            if self.isInterruptionRequested():
-                self.failed.emit("Cancelled by user")
-                return
-            if time.monotonic() > deadline:
-                self.failed.emit("Polling timed out")
-                return
+            self._check_cancel()
+            if time.monotonic() - last_change > self.STALL_TIMEOUT_S:
+                raise _JobFailed(
+                    f"No progress for {self.STALL_TIMEOUT_S:.0f}s, "
+                    f"stopped polling")
             time.sleep(self.POLL_INTERVAL_S)
             try:
                 status = get_status(pdf_id, self._id, self._key)
@@ -159,12 +207,15 @@ class PdfWorker(QThread):
             pct = int(status.get("percent_done") or 0)
             done = status.get("num_pages_completed")
             total = status.get("num_pages")
-            # Pages completed is the billable quantity (honors page_ranges);
-            # fall back to the document total if it was never reported.
+            self._state = st
             if done:
-                num_pages = int(done)
-            elif total and not num_pages:
-                num_pages = int(total)
+                self._pages_done = int(done)
+            if total:
+                self._pages_total = int(total)
+            prog = (st, pct, done)
+            if prog != last_progress:
+                last_progress = prog
+                last_change = time.monotonic()
             text = f"{st}: {done}/{total} pages" if total else st
             if text != last_status:
                 self.progress.emit(pct, text)
@@ -172,8 +223,7 @@ class PdfWorker(QThread):
             if st == "completed":
                 break
             if st == "error":
-                self.failed.emit(f"Server reported error: {status}")
-                return
+                raise _JobFailed(f"Server reported error: {status}")
 
         # Download each requested format
         out_dir = self._out
@@ -181,9 +231,7 @@ class PdfWorker(QThread):
         stem = self._pdf.stem
         saved: list[Path] = []
         for ext in self._opts.formats:
-            if self.isInterruptionRequested():
-                self.failed.emit("Cancelled by user")
-                return
+            self._check_cancel()
             self.log.emit(f"Downloading .{ext}...")
             dest = out_dir / f"{stem}.{ext}"
             download(pdf_id, ext, dest, self._id, self._key)
@@ -191,4 +239,4 @@ class PdfWorker(QThread):
             saved.append(dest)
 
         self.progress.emit(100, "Done")
-        self.finished_ok.emit(saved, num_pages)
+        return saved

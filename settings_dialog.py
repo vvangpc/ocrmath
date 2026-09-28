@@ -1,8 +1,6 @@
 """Settings dialog: API credentials + global hotkey + pricing + WebDAV sync."""
 from __future__ import annotations
 
-import time
-
 from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QKeySequence
 from PyQt6.QtWidgets import (
@@ -37,6 +35,11 @@ class SettingsDialog(QDialog):
         self._old_hotkey = all_settings.get("hotkey") or config.DEFAULT_HOTKEY
         wd = config.get_webdav()
         self._sync_worker: webdav.WebDavSyncWorker | None = None
+        self._test_worker: webdav.ConnectionTestWorker | None = None
+        # (signal, slot) pairs wiring worker results into this dialog.
+        # Workers can outlive it (the caller deletes it after exec), so
+        # done() cuts these first.
+        self._worker_links: list[tuple] = []
         # `on_purge_now(days) -> int` returns the count of recognitions purged.
         self._on_purge_now = on_purge_now
 
@@ -287,6 +290,21 @@ class SettingsDialog(QDialog):
         layout.addWidget(scroll, 1)
         layout.addLayout(btn_row)
 
+    # ---- worker wiring -----------------------------------------------------
+
+    def _link(self, signal, slot) -> None:
+        signal.connect(slot)
+        self._worker_links.append((signal, slot))
+
+    def done(self, r: int) -> None:
+        for signal, slot in self._worker_links:
+            try:
+                signal.disconnect(slot)
+            except (TypeError, RuntimeError):
+                pass
+        self._worker_links.clear()
+        super().done(r)
+
     # ---- handlers ----------------------------------------------------------
 
     @staticmethod
@@ -338,14 +356,26 @@ class SettingsDialog(QDialog):
             format_unit_price(self._pending_pdf_price, cny=False))
 
     def _test_webdav(self) -> None:
+        if self._test_worker is not None:
+            return
         url = self.wd_url_edit.text().strip()
         user = self.wd_user_edit.text().strip()
         pw = self.wd_pass_edit.text()
+        self.wd_test_btn.setEnabled(False)
         self.wd_status.setText("测试中…")
-        self.wd_status.repaint()
-        ok, msg = webdav.test_connection(url, user, pw)
+        w = webdav.ConnectionTestWorker(url, user, pw)
+        self._link(w.done, self._on_test_done)
+        self._link(w.finished, self._test_cleanup)
+        self._test_worker = w
+        w.start()
+
+    def _on_test_done(self, ok: bool, msg: str) -> None:
         prefix = "✓" if ok else "✗"
         self.wd_status.setText(f"{prefix} {msg}")
+
+    def _test_cleanup(self) -> None:
+        self.wd_test_btn.setEnabled(True)
+        self._test_worker = None
 
     def _sync_webdav(self) -> None:
         if self._sync_worker is not None:
@@ -366,9 +396,12 @@ class SettingsDialog(QDialog):
         # so cancelling the dialog leaves the stored WebDAV config untouched.
         wd = {"url": url, "user": user, "password": pw, "path": path,
               "interval": 0}
-        self._sync_worker = webdav.start_worker(
-            on_ok=self._on_sync_ok, on_fail=self._on_sync_fail,
-            on_finished=self._sync_cleanup, wd=wd)
+        w = webdav.WebDavSyncWorker(wd=wd)
+        self._link(w.finished_ok, self._on_sync_ok)
+        self._link(w.failed, self._on_sync_fail)
+        self._link(w.finished, self._sync_cleanup)
+        self._sync_worker = w
+        w.start()
 
     def _on_sync_ok(self, ts: float) -> None:
         self.wd_status.setText("✓ " + format_synced(ts))
@@ -406,7 +439,7 @@ class SettingsDialog(QDialog):
             return
         ret = QMessageBox.question(
             self, "确认清理",
-            f"将删除超过 {days} 天的历史记录和用量,继续?")
+            f"将删除超过 {days} 天的历史记录和图像缓存（费用统计保留）,继续?")
         if ret != QMessageBox.StandardButton.Yes:
             return
         try:
@@ -451,28 +484,24 @@ class SettingsDialog(QDialog):
             return
 
         try:
-            cur = config.load_all()
-            # Stamp settings_modified_at when a last-write-wins synced field
-            # changes, so WebDAV merge knows this side is fresher.
-            lww = {"app_id": app_id, "app_key": app_key,
-                   "image_price_usd": float(self._pending_image_price),
-                   "pdf_price_usd": float(self._pending_pdf_price),
-                   "usd_cny_rate": float(self.rate_spin.value())}
-            if any(cur.get(k) != v for k, v in lww.items()):
-                cur["settings_modified_at"] = time.time()
-            cur.update(lww)  # type: ignore[typeddict-item]
-            cur["hotkey"] = new_hotkey
-            cur["webdav_url"] = wd_url
-            cur["webdav_user"] = wd_user
-            cur["webdav_password"] = self.wd_pass_edit.text()
-            cur["webdav_path"] = (
-                self.wd_path_edit.text().strip() or config.DEFAULT_WEBDAV_PATH)
-            cur["webdav_sync_interval"] = max(0, wd_interval)
-            cur["cache_retention_days"] = max(
-                0, int(self.cache_retention_spin.value()))
-            # Drop deprecated bool field if present from older configs.
-            cur.pop("webdav_auto_sync", None)
-            config.save_all(cur)
+            config.save_settings({
+                "app_id": app_id,
+                "app_key": app_key,
+                "image_price_usd": float(self._pending_image_price),
+                "pdf_price_usd": float(self._pending_pdf_price),
+                "usd_cny_rate": float(self.rate_spin.value()),
+                "hotkey": new_hotkey,
+                "webdav_url": wd_url,
+                "webdav_user": wd_user,
+                "webdav_password": self.wd_pass_edit.text(),
+                "webdav_path": (self.wd_path_edit.text().strip()
+                                or config.DEFAULT_WEBDAV_PATH),
+                "webdav_sync_interval": max(0, wd_interval),
+                "cache_retention_days": max(
+                    0, int(self.cache_retention_spin.value())),
+            },
+                # Deprecated bool field from older configs.
+                drop=("webdav_auto_sync",))
         except Exception as exc:
             QMessageBox.critical(self, "保存失败", f"无法写入配置：{exc}")
             return
@@ -484,9 +513,6 @@ class SettingsDialog(QDialog):
         ret = QMessageBox.question(
             self, "确认", "清除已保存的 API 凭证?")
         if ret == QMessageBox.StandardButton.Yes:
-            cur = config.load_all()
-            cur.pop("app_id", None)
-            cur.pop("app_key", None)
-            config.save_all(cur)
+            config.save_settings({}, drop=("app_id", "app_key"))
             self.id_edit.clear()
             self.key_edit.clear()

@@ -1,4 +1,11 @@
-# NOTE: keep `version` in sync with AppVersion in installer.iss when releasing.
+# `version` is the single source of the release version: build.spec feeds it
+# to the installer, and CI refuses a tag that doesn't match it.
+# Runtime dependencies live in requirements.txt (read below), so the two
+# lists can't drift apart.
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "ocrmath"
 version = "1.2.0"
@@ -7,17 +14,13 @@ readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "vvangpc" }]
 requires-python = ">=3.10"
-dependencies = [
-    "PyQt6>=6.6,<7.0",
-    "PyQt6-WebEngine>=6.6,<7.0",
-    "requests>=2.31,<3.0",
-    "keyboard>=0.13,<0.14",
-    "pywin32>=306,<400; sys_platform == 'win32'",
-    "pypdf>=4.0,<7.0",
-]
+dynamic = ["dependencies"]
 
 [project.urls]
 Homepage = "https://github.com/vvangpc/ocrmath"
 
 [project.optional-dependencies]
 build = ["pyinstaller"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }

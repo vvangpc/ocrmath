@@ -25,8 +25,11 @@ def _truncate(s: str, n: int = 80) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
+THUMB_W, THUMB_H = 94, 54  # logical px, inside the 96x56 bordered label
+
+
 class _ThumbLoader(QThread):
-    """Reads and decodes cached PNGs off the UI thread.
+    """Reads, decodes and scales cached PNGs off the UI thread.
 
     Emits one thumbnail_ready per sha (a null QImage marks a missing file).
     The generation number lets the panel drop results from a superseded
@@ -35,18 +38,27 @@ class _ThumbLoader(QThread):
     thumbnail_ready = pyqtSignal(int, str, QImage)  # generation, sha, image
 
     def __init__(self, storage: Storage, shas: list[str], generation: int,
-                 parent=None):
+                 dpr: float, parent=None):
         super().__init__(parent)
         self._storage = storage
         self._shas = shas
         self._generation = generation
+        self._dpr = dpr
 
     def run(self) -> None:
+        w, h = round(THUMB_W * self._dpr), round(THUMB_H * self._dpr)
         for sha in self._shas:
             if self.isInterruptionRequested():
                 return
             png = self._storage.png_bytes(sha)
             img = QImage.fromData(png, "PNG") if png else QImage()
+            if not img.isNull():
+                # Scaled here (QImage is safe off the GUI thread) at device
+                # resolution, so the UI thread only wraps a small image and
+                # the thumbnail stays sharp on scaled displays.
+                img = img.scaled(w, h, Qt.AspectRatioMode.KeepAspectRatio,
+                                 Qt.TransformationMode.SmoothTransformation)
+                img.setDevicePixelRatio(self._dpr)
             self.thumbnail_ready.emit(self._generation, sha, img)
 
 
@@ -127,16 +139,12 @@ class HistoryRow(QWidget):
         outer.addLayout(right, 1)
 
     def set_thumbnail(self, thumb: QPixmap) -> None:
+        """`thumb` arrives pre-scaled from _ThumbLoader."""
         if thumb.isNull():
             self._thumb_lbl.setText("(无图)")
             return
-        scaled = thumb.scaled(
-            94, 54,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
         self._thumb_lbl.setText("")
-        self._thumb_lbl.setPixmap(scaled)
+        self._thumb_lbl.setPixmap(thumb)
 
     def _copy(self) -> None:
         latex = self.rec.latex or self.rec.text
@@ -158,6 +166,10 @@ class HistoryPanel(QWidget):
         self._generation = 0
         self._thumb_loader: _ThumbLoader | None = None
         self._rows_by_sha: dict[str, HistoryRow] = {}
+        self._query = ""
+        # Storage changed since the list was last built; the next showEvent
+        # rebuilds it. Starts True so nothing loads until first shown.
+        self._dirty = True
 
         # ---- top bar ----
         self.search_edit = QLineEdit()
@@ -201,15 +213,26 @@ class HistoryPanel(QWidget):
 
     # ---- public ------------------------------------------------------------
 
+    def invalidate(self) -> None:
+        """Storage changed elsewhere: rebuild now if on screen, otherwise on
+        the next show."""
+        if self.isVisible():
+            self.refresh()
+        else:
+            self._dirty = True
+
     def showEvent(self, evt: QShowEvent) -> None:
-        # The panel lives inside a QTabWidget: it is shown each time its tab
-        # becomes current, so this doubles as the tab-switch refresh. It also
-        # means the panel loads nothing at app startup.
+        # Shown each time its tab becomes current or the window comes back
+        # from the tray; rebuilding up to 300 row widgets every time is
+        # wasted work unless the data actually changed.
         super().showEvent(evt)
-        self.refresh()
+        if self._dirty:
+            self.refresh()
 
     def refresh(self) -> None:
+        self._dirty = False
         query = self.search_edit.text().strip()
+        self._query = query
         recs = self._storage.list_recent(query=query, limit=300)
         self.list_widget.clear()
         self._rows_by_sha.clear()
@@ -230,7 +253,8 @@ class HistoryPanel(QWidget):
         if recs:
             loader = _ThumbLoader(self._storage,
                                   [r.image_sha256 for r in recs],
-                                  self._generation, self)
+                                  self._generation,
+                                  self.devicePixelRatioF(), self)
             loader.thumbnail_ready.connect(self._on_thumbnail_ready)
             # Drop our reference before deleteLater destroys the C++ object,
             # otherwise the next refresh calls isRunning() on a dead wrapper.
@@ -238,15 +262,29 @@ class HistoryPanel(QWidget):
             self._thumb_loader = loader
             loader.start()
 
+        self._update_summary()
+
+    # ---- internal ----------------------------------------------------------
+
+    def _update_summary(self) -> None:
         stats = self._storage.stats()
         size_mb = stats["cache_bytes"] / 1024 / 1024
+        shown = self.list_widget.count()
         self.summary.setText(
             f"共 {stats['count']} 条记录"
-            f"{'（已过滤显示 ' + str(len(recs)) + ' 条）' if query else ''}    "
+            f"{f'（已过滤显示 {shown} 条）' if self._query else ''}    "
             f"缓存占用: {size_mb:.2f} MB"
         )
 
-    # ---- internal ----------------------------------------------------------
+    def _remove_row(self, rec: Recognition) -> None:
+        for i in range(self.list_widget.count()):
+            row = self.list_widget.itemWidget(self.list_widget.item(i))
+            if isinstance(row, HistoryRow) and row.rec.id == rec.id:
+                # The view deleteLater()s the row widget, so this is safe
+                # from inside that row's own button handler.
+                self.list_widget.takeItem(i)
+                break
+        self._rows_by_sha.pop(rec.image_sha256, None)
 
     def _on_loader_finished(self, loader: _ThumbLoader) -> None:
         if self._thumb_loader is loader:
@@ -276,7 +314,9 @@ class HistoryPanel(QWidget):
         )
         if ret == QMessageBox.StandardButton.Yes:
             self._storage.delete(rec.id)
-            self.refresh()
+            # Drop just this row instead of rebuilding the whole list.
+            self._remove_row(rec)
+            self._update_summary()
 
     def _clear_all(self) -> None:
         stats = self._storage.stats()

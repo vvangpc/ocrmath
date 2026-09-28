@@ -46,6 +46,9 @@ class PdfPanel(QWidget):
         self.setAcceptDrops(True)
         self._build_ui()
 
+    def is_busy(self) -> bool:
+        return self._worker is not None and self._worker.isRunning()
+
     def refresh_price_display(self) -> None:
         """Recompute the cost label after the user changes pricing."""
         if self._pdf_path:
@@ -308,13 +311,16 @@ class PdfPanel(QWidget):
         self.cancel_btn.setEnabled(True)
 
         # Snapshot for billing: the user may pick another PDF mid-conversion.
-        self._billing_page_count = self._page_count
+        # The local count is the whole document, so it is only a valid
+        # fallback when no page range was requested.
+        self._billing_page_count = self._page_count if not page_ranges else None
 
         self._worker = PdfWorker(
             self._pdf_path, opts, out_dir,
             creds["app_id"], creds["app_key"], parent=self)
         self._worker.progress.connect(self._on_progress)
         self._worker.log.connect(self._on_log)
+        self._worker.billed.connect(self._on_billed)
         self._worker.finished_ok.connect(self._on_done)
         self._worker.failed.connect(self._on_failed)
         self._worker.finished.connect(self._cleanup_worker)
@@ -334,25 +340,28 @@ class PdfPanel(QWidget):
     def _on_log(self, line: str) -> None:
         self.log_view.appendPlainText(line)
 
-    def _on_done(self, paths: list, num_pages: int) -> None:
-        # Snapshot before _on_pages_processed triggers a stats refresh that
-        # may repaint panel state.
+    def _on_billed(self, num_pages: int) -> None:
+        # Emitted for every submitted job, including cancelled / failed ones
+        # (Mathpix still bills them). Prefer the page count reported by the
+        # API (honors page_ranges, works without pypdf); fall back to the
+        # local count snapshot.
+        pages = num_pages or self._billing_page_count or 0
+        if not pages:
+            return
+        try:
+            config.bump_pdf_pages(pages)
+        except Exception as exc:
+            sys.stderr.write(f"counter bump failed: {exc}\n")
+        if self._on_pages_processed:
+            try:
+                self._on_pages_processed(pages)
+            except Exception:
+                pass
+
+    def _on_done(self, paths: list) -> None:
         out = Path(self.out_edit.text().strip() or ".")
         self.status_label.setText(f"完成，共 {len(paths)} 个文件")
         self.progress.setValue(100)
-        # Prefer the page count reported by the API (honors page_ranges and
-        # works without pypdf); fall back to the local count snapshot.
-        pages = num_pages or self._billing_page_count or 0
-        if pages:
-            try:
-                config.bump_pdf_pages(pages)
-            except Exception as exc:
-                sys.stderr.write(f"counter bump failed: {exc}\n")
-            if self._on_pages_processed:
-                try:
-                    self._on_pages_processed(pages)
-                except Exception:
-                    pass
         QMessageBox.information(
             self, "完成",
             "转换完成：\n" + "\n".join(str(p) for p in paths))

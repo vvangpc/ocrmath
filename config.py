@@ -185,12 +185,22 @@ def load() -> dict | None:
 
 def save(app_id: str, app_key: str) -> None:
     """Backward-compat: preserves any existing hotkey."""
+    save_settings({"app_id": app_id, "app_key": app_key})
+
+
+def save_settings(values: dict, drop: tuple[str, ...] = ()) -> None:
+    """Atomically merge `values` into the stored settings and remove `drop`.
+
+    Stamps settings_modified_at when a last-write-wins synced field changes,
+    so WebDAV merge knows this side is fresher. Holding _LOCK keeps a sync
+    finishing on the worker thread from interleaving with the write."""
     with _LOCK:
         cur = load_all()
-        if cur.get("app_id") != app_id or cur.get("app_key") != app_key:
+        if any(k in LWW_KEYS and cur.get(k) != v for k, v in values.items()):
             cur["settings_modified_at"] = time.time()
-        cur["app_id"] = app_id
-        cur["app_key"] = app_key
+        cur.update(values)  # type: ignore[typeddict-item]
+        for k in drop:
+            cur.pop(k, None)  # type: ignore[misc]
         save_all(cur)
 
 
@@ -281,44 +291,65 @@ def get_last_synced() -> float:
     return float(load_all().get("last_synced_at", 0.0) or 0.0)
 
 
-def get_modified_at() -> float:
-    """Last local edit of syncable settings (creds / prices / rate).
-    Old configs without the field fall back to last_synced_at so merge
-    behaviour matches the previous release."""
-    s = load_all()
+def _modified_at(s: Settings) -> float:
+    # Old configs without the field fall back to last_synced_at so merge
+    # behaviour matches the previous release.
     return float(s.get("settings_modified_at",
                        s.get("last_synced_at", 0.0)) or 0.0)
 
 
+def get_modified_at() -> float:
+    """Last local edit of syncable settings (creds / prices / rate)."""
+    return _modified_at(load_all())
+
+
 # ---- sync payload ----------------------------------------------------------
 
-_SYNCABLE_KEYS = ("app_id", "app_key",
-                  "image_count", "pdf_page_count",
-                  "image_price_usd", "pdf_price_usd", "usd_cny_rate")
+# Synced fields, by merge rule: counters take the max, the rest are
+# last-write-wins by settings_modified_at.
+COUNTER_KEYS = ("image_count", "pdf_page_count")
+LWW_KEYS = ("app_id", "app_key",
+            "image_price_usd", "pdf_price_usd", "usd_cny_rate")
 
 
 def get_syncable_payload() -> dict:
-    """Fields that travel through WebDAV. Excludes hotkey + webdav creds."""
+    """Fields that travel through WebDAV. Excludes hotkey + webdav creds.
+    Carries settings_modified_at so the other side can tell which copy of
+    the last-write-wins fields was edited more recently."""
     s = load_all()
-    out: dict = {}
-    for k in _SYNCABLE_KEYS:
-        if k in s:
-            out[k] = s[k]
+    out: dict = {k: s[k] for k in COUNTER_KEYS + LWW_KEYS if k in s}
     out.setdefault("image_count", 0)
     out.setdefault("pdf_page_count", 0)
     out.setdefault("image_price_usd", DEFAULT_IMAGE_PRICE)
     out.setdefault("pdf_price_usd", DEFAULT_PDF_PRICE)
     out.setdefault("usd_cny_rate", DEFAULT_USD_CNY_RATE)
+    out["settings_modified_at"] = _modified_at(s)
     return out
 
 
-def apply_synced_payload(merged: dict, synced_at: float) -> None:
-    """Persist a merged sync result and stamp last_synced_at."""
+def apply_synced_payload(merged: dict, synced_at: float,
+                         base_modified_at: float) -> None:
+    """Persist a merged sync result and stamp last_synced_at.
+
+    `merged` was computed from a snapshot taken before the network
+    round-trip, so writes that landed since then must not be clobbered:
+    counters keep the larger value (a bump mid-sync survives), and the
+    last-write-wins fields are applied only if settings_modified_at still
+    equals `base_modified_at` — otherwise the user saved newer settings
+    mid-sync, and the next sync pushes them."""
     with _LOCK:
         cur = load_all()
-        for k in _SYNCABLE_KEYS:
+        for k in COUNTER_KEYS:
             if k in merged:
-                cur[k] = merged[k]  # type: ignore[literal-required]
+                cur[k] = max(int(cur.get(k, 0) or 0),  # type: ignore[literal-required]
+                             int(merged[k] or 0))
+        if _modified_at(cur) == base_modified_at:
+            for k in LWW_KEYS:
+                if k in merged:
+                    cur[k] = merged[k]  # type: ignore[literal-required]
+            if "settings_modified_at" in merged:
+                cur["settings_modified_at"] = float(
+                    merged["settings_modified_at"])
         cur["last_synced_at"] = float(synced_at)
         save_all(cur)
 

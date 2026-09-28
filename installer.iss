@@ -4,7 +4,12 @@
 ;   "C:\Users\<user>\AppData\Local\Programs\Inno Setup 6\ISCC.exe" installer.iss
 
 #define AppName        "ocrmath"
-#define AppVersion     "1.2.0"
+; The version comes from pyproject.toml: build.spec writes it to
+; installer\version.iss, so run PyInstaller first. /DAppVersion=x.y.z on
+; the ISCC command line overrides it.
+#ifndef AppVersion
+  #include "installer\version.iss"
+#endif
 #define AppPublisher   "vvangpc"
 #define AppURL         "https://github.com/vvangpc/ocrmath"
 #define AppExe         "ocrmath.exe"

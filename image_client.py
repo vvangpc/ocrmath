@@ -12,6 +12,10 @@ from api_common import format_request_error
 
 API_URL = "https://api.mathpix.com/v3/text"
 
+# Keep-alive session: back-to-back recognitions skip the TCP + TLS handshake.
+# Image OCR is single-flight (App._worker), so no two threads share it.
+_SESSION = requests.Session()
+
 
 def recognize(
     png_bytes: bytes,
@@ -32,7 +36,7 @@ def recognize(
         "math_display_delimiters": list(display_delim),
         "rm_spaces": rm_spaces,
     }
-    resp = requests.post(
+    resp = _SESSION.post(
         API_URL,
         headers={
             "app_id": app_id,

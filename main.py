@@ -1,18 +1,24 @@
 """Application entry: tray icon, global hotkey, and signal wiring."""
 from __future__ import annotations
 
+import getpass
 import hashlib
 import os
 import sys
+import time
 import traceback
 
-from PyQt6.QtCore import Qt, QObject, QTimer, QEventLoop, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import (
+    Qt, QObject, QThread, QTimer, QEventLoop, QLockFile, pyqtSignal, pyqtSlot,
+)
 from PyQt6.QtGui import QAction
+from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import (
     QApplication, QSystemTrayIcon, QMenu, QMessageBox,
 )
 
 import config
+import mathjax_view
 import webdav
 from image_client import ImageOcrWorker
 from main_window import MainWindow
@@ -22,6 +28,47 @@ from snipper import Snipper
 from storage import Storage, Recognition
 from styles import STYLESHEET, ACCENT
 from ui_icons import app_icon, icon
+
+
+# The app lives in the tray for days, so the startup purge alone would let
+# the cache grow past the retention window; re-check this often.
+CACHE_PURGE_INTERVAL_MS = 6 * 3600 * 1000
+
+
+def _instance_server_name() -> str:
+    # Named pipes are machine-wide on Windows, so key the name per user.
+    try:
+        user = getpass.getuser()
+    except Exception:
+        user = ""
+    return "ocrmath-" + hashlib.sha1(user.encode()).hexdigest()[:12]
+
+
+def _activate_running_instance() -> None:
+    """Ask the instance holding the lock to show its main window."""
+    sock = QLocalSocket()
+    sock.connectToServer(_instance_server_name())
+    if sock.waitForConnected(500):
+        sock.write(b"show")
+        sock.waitForBytesWritten(500)
+        sock.disconnectFromServer()
+
+
+def _wait_thread(thread: QThread, timeout_ms: int) -> None:
+    """Spin a local event loop until `thread` finishes or timeout_ms passes,
+    so queued result signals keep being delivered meanwhile."""
+    if timeout_ms <= 0:
+        return
+    loop = QEventLoop()
+    thread.finished.connect(loop.quit)
+    if not thread.isRunning():  # finished before we connected
+        return
+    timer = QTimer()
+    timer.setSingleShot(True)
+    timer.timeout.connect(loop.quit)
+    timer.start(timeout_ms)
+    loop.exec()
+    timer.stop()
 
 
 class HotkeyBridge(QObject):
@@ -41,12 +88,26 @@ class App(QObject):
         self._current_hotkey: str = ""
         self._pending_sha: str | None = None
         self._pending_png: bytes | None = None
+        self._worker: ImageOcrWorker | None = None
         self._sync_worker: webdav.WebDavSyncWorker | None = None
         self._exit_sync_worker: webdav.WebDavSyncWorker | None = None
+        self._settings_dlg: SettingsDialog | None = None
 
         self._periodic_timer = QTimer(self)
         self._periodic_timer.setSingleShot(False)
         self._periodic_timer.timeout.connect(self._on_periodic_tick)
+
+        self._purge_timer = QTimer(self)
+        self._purge_timer.timeout.connect(self._kickoff_cache_purge)
+
+        # A second launch connects here (see main()) to bring us forward.
+        self._instance_server = QLocalServer(self)
+        self._instance_server.newConnection.connect(self._on_second_instance)
+        name = _instance_server_name()
+        QLocalServer.removeServer(name)  # stale socket after a crash (Unix)
+        if not self._instance_server.listen(name):
+            sys.stderr.write(f"instance server: "
+                             f"{self._instance_server.errorString()}\n")
 
         # Storage
         self.storage = Storage()
@@ -65,7 +126,6 @@ class App(QObject):
 
         self.snipper.captured.connect(self._on_captured)
         self.snipper.cancelled.connect(lambda: None)
-        self._worker: ImageOcrWorker | None = None
 
         # Tray + busy animation
         self.tray = self._build_tray()
@@ -88,6 +148,7 @@ class App(QObject):
         QTimer.singleShot(1000, self._maybe_backfill_usage)
         QTimer.singleShot(2000, self._kickoff_startup_sync)
         QTimer.singleShot(3000, self._kickoff_cache_purge)
+        self._purge_timer.start(CACHE_PURGE_INTERVAL_MS)
 
     # ---- credentials -------------------------------------------------------
 
@@ -95,14 +156,26 @@ class App(QObject):
         return config.load()
 
     def open_settings(self) -> None:
+        # Re-entrant calls (hotkey / tray while the modal dialog is open)
+        # bring the open one forward instead of stacking another.
+        if self._settings_dlg is not None:
+            self._settings_dlg.raise_()
+            self._settings_dlg.activateWindow()
+            return
         dlg = SettingsDialog(self.main_win, on_purge_now=self._purge_now)
         dlg.settings_changed.connect(self._on_settings_changed)
-        dlg.exec()
+        self._settings_dlg = dlg
+        try:
+            dlg.exec()
+        finally:
+            self._settings_dlg = None
+            # Parented to main_win, so without this every open leaks one.
+            dlg.deleteLater()
 
     def _purge_now(self, days: int) -> int:
-        """Synchronous purge invoked from the settings dialog."""
+        """Synchronous purge invoked from the settings dialog. Usage/cost
+        records are kept, like clear_all(): the monthly summary needs them."""
         n = self.storage.purge_older_than(days)
-        self.storage.purge_old_usage(days)
         try:
             self.main_win.refresh_history_panel()
             self.main_win.refresh_stats()
@@ -170,11 +243,28 @@ class App(QObject):
         self.main_win.raise_()
         self.main_win.activateWindow()
 
+    def _on_second_instance(self) -> None:
+        while (conn := self._instance_server.nextPendingConnection()) is not None:
+            conn.disconnectFromServer()
+            conn.deleteLater()
+        self._show_main()
+
+    def threads_still_running(self) -> bool:
+        """True if a worker thread is still mid-run (e.g. blocked on the
+        network) — see main() for why that matters at exit."""
+        threads = [self._worker, self._sync_worker, self._exit_sync_worker]
+        if any(t is not None and t.isRunning() for t in threads):
+            return True
+        return (self.main_win.pdf_panel.is_busy()
+                or webdav.any_running()
+                or mathjax_view.downloader_running())
+
     def _quit(self) -> None:
         self._uninstall_hotkey()
         self._stop_busy()
         try:
             self._periodic_timer.stop()
+            self._purge_timer.stop()
         except Exception:
             pass
         # Best-effort exit sync (max 5s).
@@ -242,6 +332,13 @@ class App(QObject):
 
     @pyqtSlot()
     def on_snip(self) -> None:
+        if self._worker is not None:
+            # Recognition is single-flight; say so instead of letting the
+            # user select a region that would then be silently dropped.
+            self.tray.showMessage(
+                "ocrmath", "上一张截图还在识别中，请稍候…",
+                QSystemTrayIcon.MessageIcon.Information, 2500)
+            return
         if not config.load():
             self.open_settings()
             if not config.load():
@@ -343,11 +440,10 @@ class App(QObject):
             return
         try:
             n_recs = self.storage.purge_older_than(days)
-            n_usage = self.storage.purge_old_usage(days)
-            if (n_recs or n_usage):
+            if n_recs:
                 sys.stderr.write(
-                    f"cache purge: removed {n_recs} recognitions + "
-                    f"{n_usage} usage rows older than {days} days\n")
+                    f"cache purge: removed {n_recs} recognitions "
+                    f"older than {days} days\n")
                 try:
                     self.main_win.refresh_history_panel()
                     self.main_win.refresh_stats()
@@ -392,23 +488,20 @@ class App(QObject):
         """Block UI for up to timeout_ms while a final sync completes."""
         if not self._webdav_configured():
             return
-        loop = QEventLoop()
-        finish_timer = QTimer()
-        finish_timer.setSingleShot(True)
-        finish_timer.timeout.connect(loop.quit)
-
+        deadline = time.monotonic() + timeout_ms / 1000
+        # sync_once is single-flight: while a background sync is in flight a
+        # new one would fail at once, so let that one land first.
+        if self._sync_worker is not None:
+            _wait_thread(self._sync_worker, timeout_ms)
+        remaining = int((deadline - time.monotonic()) * 1000)
+        if remaining <= 0:
+            return
         # Keep a reference on self: if the sync outlives the timeout, letting
         # the QThread be garbage-collected while still running aborts the app
         # ("QThread: Destroyed while thread is still running").
-        finish_timer.start(timeout_ms)
-        worker = webdav.start_worker(
-            on_ok=lambda *_a: loop.quit(),
-            on_fail=lambda msg: (
-                sys.stderr.write(f"exit sync failed: {msg}\n"), loop.quit()))
-        self._exit_sync_worker = worker
-        loop.exec()
-        # Best-effort: give the worker a brief grace window to land its result.
-        worker.wait(500)
+        self._exit_sync_worker = webdav.start_worker(
+            on_fail=lambda msg: sys.stderr.write(f"exit sync failed: {msg}\n"))
+        _wait_thread(self._exit_sync_worker, remaining)
 
     def _sync_now_manual(self) -> None:
         wd = config.get_webdav()
@@ -477,8 +570,29 @@ def main() -> int:
                              "当前桌面环境不支持系统托盘。")
         return 1
 
-    _ = App(qapp)
-    return qapp.exec()
+    # Single instance: a second copy would register the hotkey again (one
+    # press, two snips) and share the database. A lock left behind by a
+    # crash is detected via its owner PID; staleLockTime 0 disables the
+    # age-based takeover that would hand a live lock to a launch after 30s.
+    config.CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    lock = QLockFile(str(config.CONFIG_PATH.parent / "instance.lock"))
+    lock.setStaleLockTime(0)
+    if not lock.tryLock(200):
+        _activate_running_instance()
+        return 0
+
+    app = App(qapp)
+    code = qapp.exec()
+    if app.threads_still_running():
+        # A worker still blocked in a network call would be destroyed
+        # mid-run during interpreter teardown, which Qt turns into an abort
+        # (crash dialog). Everything worth keeping is on disk by now
+        # (App._quit), so skip the teardown.
+        lock.unlock()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(code)
+    return code
 
 
 if __name__ == "__main__":

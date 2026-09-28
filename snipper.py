@@ -16,6 +16,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import QWidget
 
 MIN_REGION_SIDE = 5  # px — anything smaller is treated as misclick
+DIM_COLOR = QColor(0, 0, 0, 110)
 
 
 class Snipper(QWidget):
@@ -34,6 +35,7 @@ class Snipper(QWidget):
         self._origin: QPoint | None = None
         self._current: QPoint | None = None
         self._screenshot: QPixmap | None = None
+        self._dimmed: QPixmap | None = None  # screenshot + dim, pre-rendered
         self._virtual_origin = QPoint(0, 0)
 
     # ---- public API --------------------------------------------------------
@@ -67,66 +69,109 @@ class Snipper(QWidget):
             painter.drawPixmap(geom.topLeft() - full.topLeft(), shot)
         painter.end()
         self._screenshot = canvas
+        # Dim once here rather than blending a full-desktop fill on every
+        # mouse move.
+        dimmed = QPixmap(canvas)
+        painter = QPainter(dimmed)
+        painter.fillRect(QRect(QPoint(0, 0), full.size()), DIM_COLOR)
+        painter.end()
+        self._dimmed = dimmed
 
-        self.setGeometry(full)
         self._origin = None
         self._current = None
-        self.showFullScreen()
+        # Plain show() on the virtual-desktop rect: showFullScreen() would
+        # snap the overlay to a single monitor, leaving the others
+        # unselectable on multi-screen setups.
+        self.setGeometry(full)
+        self.show()
         self.raise_()
         self.activateWindow()
 
     # ---- events ------------------------------------------------------------
 
-    def paintEvent(self, _evt: QPaintEvent) -> None:
-        if self._screenshot is None:
+    def paintEvent(self, evt: QPaintEvent) -> None:
+        if self._screenshot is None or self._dimmed is None:
             return
         p = QPainter(self)
-        p.drawPixmap(0, 0, self._screenshot)
-        # Dim overlay
-        p.fillRect(self.rect(), QColor(0, 0, 0, 110))
-        # Highlight selection rect
-        if self._origin and self._current:
-            sel = QRect(self._origin, self._current).normalized()
-            # Re-draw original pixels inside selection to undo the dim.
-            # The source rect is in device pixels, so scale by the DPR.
-            p.drawPixmap(sel, self._screenshot, _to_device_rect(sel, self._screenshot))
-            pen = QPen(QColor(255, 90, 0), 2)
-            p.setPen(pen)
-            p.drawRect(sel)
-            # Size label
-            label = f"{sel.width()} x {sel.height()}"
-            p.setPen(QColor(255, 255, 255))
-            p.drawText(sel.x() + 4, max(0, sel.y() - 6), label)
+        # Only the damaged region: mouse moves update() just the selection's
+        # old + new bounds. Source rects are in device pixels (DPR-scaled).
+        area = evt.rect()
+        p.drawPixmap(area, self._dimmed, _to_device_rect(area, self._dimmed))
+        sel = self._selection()
+        if sel is None:
+            return
+        # Re-draw original pixels inside the selection to undo the dim.
+        inner = sel.intersected(area)
+        if not inner.isEmpty():
+            p.drawPixmap(inner, self._screenshot,
+                         _to_device_rect(inner, self._screenshot))
+        p.setPen(QPen(QColor(255, 90, 0), 2))
+        p.drawRect(sel)
+        # Size label
+        label = f"{sel.width()} x {sel.height()}"
+        p.setPen(QColor(255, 255, 255))
+        p.drawText(sel.x() + 4, max(0, sel.y() - 6), label)
+
+    def _selection(self) -> QRect | None:
+        if self._origin is None or self._current is None:
+            return None
+        return QRect(self._origin, self._current).normalized()
+
+    def _selection_bounds(self) -> QRect:
+        """Everything paintEvent draws for the selection: the rect, its 2px
+        pen, and the size label above it."""
+        sel = self._selection()
+        if sel is None:
+            return QRect()
+        bounds = sel.adjusted(-3, -3, 3, 3)
+        label = QRect(sel.x(), max(0, sel.y() - 6) - 24, 180, 30)
+        return bounds.united(label)
+
+    def _move_selection_end(self, pos: QPoint) -> None:
+        old = self._selection_bounds()
+        self._current = pos
+        self.update(old.united(self._selection_bounds()))
+
+    def _finish(self) -> None:
+        """Hide and drop the full-desktop pixmaps (tens of MB on 4K)."""
+        self.hide()
+        self._screenshot = None
+        self._dimmed = None
+        self._origin = None
+        self._current = None
 
     def mousePressEvent(self, evt: QMouseEvent) -> None:
         if evt.button() == Qt.MouseButton.LeftButton:
+            old = self._selection_bounds()
             self._origin = evt.pos()
             self._current = evt.pos()
-            self.update()
+            self.update(old.united(self._selection_bounds()))
 
     def mouseMoveEvent(self, evt: QMouseEvent) -> None:
-        if self._origin:
-            self._current = evt.pos()
-            self.update()
+        if self._origin is not None:
+            self._move_selection_end(evt.pos())
 
     def mouseReleaseEvent(self, evt: QMouseEvent) -> None:
-        if evt.button() != Qt.MouseButton.LeftButton or not self._origin:
+        if evt.button() != Qt.MouseButton.LeftButton or self._origin is None:
             return
         if self._screenshot is None:
             return
         self._current = evt.pos()
-        sel = QRect(self._origin, self._current).normalized()
-        self.hide()
-        if sel.width() < MIN_REGION_SIDE or sel.height() < MIN_REGION_SIDE:
+        sel = self._selection()
+        cropped = None
+        if sel.width() >= MIN_REGION_SIDE and sel.height() >= MIN_REGION_SIDE:
+            # copy() takes device-pixel coordinates — crop at full resolution.
+            cropped = self._screenshot.copy(
+                _to_device_rect(sel, self._screenshot))
+        self._finish()
+        if cropped is None:
             self.cancelled.emit()
             return
-        # copy() takes device-pixel coordinates — crop at full resolution.
-        cropped = self._screenshot.copy(_to_device_rect(sel, self._screenshot))
         self.captured.emit(_pixmap_to_png_bytes(cropped))
 
     def keyPressEvent(self, evt: QKeyEvent) -> None:
         if evt.key() == Qt.Key.Key_Escape:
-            self.hide()
+            self._finish()
             self.cancelled.emit()
 
 

@@ -1,10 +1,12 @@
 """Small vector icons drawn with Qt, avoiding external image assets."""
 from __future__ import annotations
 
+import math
+
 from PyQt6.QtCore import QPointF, QRectF, Qt
 from PyQt6.QtGui import (
-    QColor, QConicalGradient, QIcon, QLinearGradient, QPainter, QPainterPath,
-    QPen, QPixmap,
+    QBrush, QColor, QIcon, QImage, QLinearGradient, QPainter, QPainterPath,
+    QPen, QPixmap, QRadialGradient,
 )
 
 INK = "#263238"
@@ -22,45 +24,138 @@ def _pixmap(size: int) -> tuple[QPixmap, QPainter]:
     return pix, painter
 
 
-def app_icon(size: int = 64, *, busy: bool = False) -> QIcon:
-    """Return the app/tray icon."""
-    key = ("app", size, busy)
+# ---- app logo --------------------------------------------------------------
+#
+# Dark squircle tile carrying an orange radical over a white x (√x). Detail is
+# size-adaptive: below 32px the gloss, glow and shadow go, strokes get
+# heavier and the vinculum is snapped to the pixel grid so the tray icon stays
+# crisp at 16px. tools/make_icon.py renders icon.ico from this same code.
+
+LOGO_SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
+
+# Unit-space geometry: radical (tick, valley, apex, vinculum end) and the
+# two strokes of the x, with a slight italic lean.
+_RADICAL = ((0.185, 0.555), (0.28, 0.505), (0.405, 0.755), (0.545, 0.265),
+            (0.815, 0.265))
+_X_STROKES = (((0.612, 0.43), (0.752, 0.635)),
+              ((0.768, 0.43), (0.596, 0.635)))
+
+
+def _squircle(rect: QRectF, n: float) -> QPainterPath:
+    """Superellipse |x|^n + |y|^n = 1 fitted to `rect`."""
+    cx, cy = rect.center().x(), rect.center().y()
+    a, b = rect.width() / 2, rect.height() / 2
+    path = QPainterPath()
+    steps = 160
+    for i in range(steps):
+        t = 2 * math.pi * i / steps
+        c, s = math.cos(t), math.sin(t)
+        pt = QPointF(cx + a * math.copysign(abs(c) ** (2 / n), c),
+                     cy + b * math.copysign(abs(s) ** (2 / n), s))
+        if i == 0:
+            path.moveTo(pt)
+        else:
+            path.lineTo(pt)
+    path.closeSubpath()
+    return path
+
+
+def _stroke(painter: QPainter, pts, width: float, brush: QBrush) -> None:
+    painter.setPen(QPen(brush, width, Qt.PenStyle.SolidLine,
+                        Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    path = QPainterPath(QPointF(*pts[0]))
+    for pt in pts[1:]:
+        path.lineTo(QPointF(*pt))
+    painter.drawPath(path)
+
+
+def render_logo(size: int, *, opacity: float = 1.0) -> QImage:
+    """Draw the app logo at `size` x `size` px."""
+    img = QImage(size, size, QImage.Format.Format_ARGB32_Premultiplied)
+    img.fill(Qt.GlobalColor.transparent)
+    p = QPainter(img)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setOpacity(opacity)
+    s = float(size)
+    small = size < 32
+
+    # Tile: full-bleed at tray sizes, where every pixel counts.
+    pad = 0.0 if small else s * 0.035
+    n = 4.2 if small else 5.0
+    rect = QRectF(pad, pad, s - 2 * pad, s - 2 * pad)
+    shape = _squircle(rect, n)
+    bg = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+    bg.setColorAt(0, QColor("#3b4354"))
+    bg.setColorAt(1, QColor("#161a23"))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(bg)
+    p.drawPath(shape)
+    if not small:
+        p.save()
+        p.setClipPath(shape)
+        glow = QRadialGradient(QPointF(0.5 * s, 0.56 * s), 0.46 * s)
+        glow.setColorAt(0, QColor(255, 122, 26, 46))
+        glow.setColorAt(1, QColor(255, 122, 26, 0))
+        p.setBrush(glow)
+        p.drawRect(rect)
+        sheen = QLinearGradient(0, rect.top(), 0, rect.top() + rect.height() / 2)
+        sheen.setColorAt(0, QColor(255, 255, 255, 34))
+        sheen.setColorAt(1, QColor(255, 255, 255, 0))
+        p.setBrush(sheen)
+        p.drawRect(rect)
+        p.restore()
+    # Light rim keeps the dark tile's edge readable on dark taskbars.
+    rw = 1.0 if small else max(1.0, s / 128)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.setPen(QPen(QColor(255, 255, 255, 52 if small else 44), rw))
+    p.drawPath(_squircle(rect.adjusted(rw / 2, rw / 2, -rw / 2, -rw / 2), n))
+
+    orange = QLinearGradient(0.18 * s, 0, 0.82 * s, 0)
+    orange.setColorAt(0, QColor("#ffc766"))
+    orange.setColorAt(1, QColor("#ff6a00"))
+    white = QBrush(QColor("white"))
+
+    if small:
+        w = 2.0 if size <= 20 else 2.5
+        vin_y = round(s * 0.27 - w / 2) + w / 2  # top edge on a pixel row
+        radical = [(0.2 * s, 0.575 * s), (0.28 * s, 0.53 * s),
+                   (0.4 * s, 0.8 * s), (0.53 * s, vin_y), (0.86 * s, vin_y)]
+        _stroke(p, radical, w, QBrush(orange))
+        xw = max(1.5, w * 0.8)
+        top, bottom = vin_y + w / 2 + xw * 0.9, 0.8 * s
+        left, right = 0.6 * s, 0.83 * s
+        _stroke(p, [(left, top), (right, bottom)], xw, white)
+        _stroke(p, [(right, top), (left, bottom)], xw, white)
+    else:
+        def scaled(pts):
+            return [(x * s, y * s) for x, y in pts]
+        # A touch heavier at mid sizes so strokes keep >= 2.5px at 32.
+        w = 0.072 * s + (0.9 if s <= 48 else 0.0)
+        xw = 0.066 * s + (0.8 if s <= 48 else 0.0)
+        p.save()
+        p.translate(0, 0.016 * s)
+        _stroke(p, scaled(_RADICAL), w, QBrush(QColor(0, 0, 0, 80)))
+        p.restore()
+        _stroke(p, scaled(_RADICAL), w, QBrush(orange))
+        for stroke in _X_STROKES:
+            _stroke(p, scaled(stroke), xw, white)
+    p.end()
+    return img
+
+
+def app_icon(*, busy: bool = False) -> QIcon:
+    """The app/tray icon, holding every LOGO_SIZES rendition so Qt picks the
+    hand-tuned one for whatever pixel size the tray asks for. `busy` is the
+    faded frame the tray blinks to while a recognition runs."""
+    key = ("app", busy)
     cached = _ICON_CACHE.get(key)
     if cached is not None:
         return cached
-    pix, painter = _pixmap(size)
-    pad = max(2, int(size * 0.05))
-    rect = QRectF(pad, pad, size - pad * 2, size - pad * 2)
-
-    bg = QLinearGradient(rect.topLeft(), rect.bottomRight())
-    bg.setColorAt(0, QColor("#ff8a2a"))
-    bg.setColorAt(1, QColor("#f04438"))
-    if busy:
-        painter.setOpacity(0.55)
-
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(bg)
-    painter.drawRoundedRect(rect, size * 0.22, size * 0.22)
-
-    shine = QConicalGradient(QPointF(size * 0.52, size * 0.48), -35)
-    shine.setColorAt(0.0, QColor(255, 255, 255, 76))
-    shine.setColorAt(0.35, QColor(255, 255, 255, 0))
-    shine.setColorAt(1.0, QColor(255, 255, 255, 76))
-    painter.setBrush(shine)
-    painter.drawRoundedRect(rect.adjusted(3, 3, -3, -3), size * 0.18, size * 0.18)
-
-    pen = QPen(QColor("white"), max(3, size * 0.08), Qt.PenStyle.SolidLine,
-               Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
-    painter.setPen(pen)
-    path = QPainterPath()
-    path.moveTo(size * 0.66, size * 0.25)
-    path.lineTo(size * 0.35, size * 0.25)
-    path.lineTo(size * 0.53, size * 0.50)
-    path.lineTo(size * 0.35, size * 0.75)
-    path.lineTo(size * 0.68, size * 0.75)
-    painter.drawPath(path)
-    painter.end()
-    result = QIcon(pix)
+    result = QIcon()
+    for size in LOGO_SIZES:
+        result.addPixmap(QPixmap.fromImage(
+            render_logo(size, opacity=0.5 if busy else 1.0)))
     _ICON_CACHE[key] = result
     return result
 

@@ -4,9 +4,10 @@ MathJax produces vector SVG output, which gives crisp formulas at any zoom
 level and clean CJK + math mixing (the page's font stack handles the text
 parts; SVG handles the math).
 
-On first launch, the widget downloads `tex-svg.js` (~1 MB) from
-cdn.jsdelivr.net into `%APPDATA%\\ocrmath\\mathjax\\`. Subsequent launches
-load it from disk — fully offline.
+Installer builds bundle a pinned `tex-svg.js` (build.spec vendors it); on
+first use it is copied into `%APPDATA%\\ocrmath\\mathjax\\`. Source runs
+without a vendored copy download it once from cdn.jsdelivr.net instead,
+verified against MATHJAX_SHA256. Either way later launches are offline.
 
 Public surface:
     MathJaxView          # QWebEngineView subclass with set_content()
@@ -15,7 +16,9 @@ Public surface:
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -32,7 +35,13 @@ except ImportError:  # pragma: no cover — caller checks WEBENGINE_AVAILABLE
 import config
 
 WEBENGINE_AVAILABLE = _WEBENGINE_OK
-MATHJAX_URL = "https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"
+# Pinned: this script runs inside the preview page, so an unpinned "@3" tag
+# would execute whatever the CDN serves next. Bump version + hash together.
+MATHJAX_VERSION = "3.2.2"
+MATHJAX_URL = (f"https://cdn.jsdelivr.net/npm/mathjax@{MATHJAX_VERSION}"
+               f"/es5/tex-svg.js")
+MATHJAX_SHA256 = (
+    "d4295dc33744836935c1399feece5159577b34c5c8ffb9f1c6324cd82e03a882")
 MATHJAX_FILENAME = "tex-svg.js"
 HTML_FILENAME = "preview.html"
 # Anything smaller than this is almost certainly a partial download.
@@ -51,12 +60,39 @@ def html_path() -> Path:
     return cache_dir() / HTML_FILENAME
 
 
+def bundled_path() -> Path | None:
+    """The tex-svg.js shipped with the app: PyInstaller's data dir in frozen
+    builds, the vendor/ dir build.spec fills when running from source."""
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        p = Path(base) / "mathjax" / MATHJAX_FILENAME
+    else:
+        p = Path(__file__).resolve().parent / "vendor" / MATHJAX_FILENAME
+    return p if p.is_file() else None
+
+
 def is_ready() -> bool:
     p = mathjax_path()
     try:
         return p.exists() and p.stat().st_size >= _MIN_BUNDLE_BYTES
     except OSError:
         return False
+
+
+def install_bundled() -> bool:
+    """Copy the bundled tex-svg.js into the cache dir. True on success."""
+    src = bundled_path()
+    if src is None:
+        return False
+    try:
+        cache_dir().mkdir(parents=True, exist_ok=True)
+        tmp = mathjax_path().with_suffix(".js.tmp")
+        shutil.copyfile(src, tmp)
+        tmp.replace(mathjax_path())
+    except OSError as exc:
+        sys.stderr.write(f"MathJax bundle copy failed: {exc}\n")
+        return False
+    return is_ready()
 
 
 # ---- HTML template ---------------------------------------------------------
@@ -195,6 +231,11 @@ class MathJaxDownloader(QThread):
                 tmp.unlink(missing_ok=True)
                 self.failed.emit("下载内容过小，可能不完整")
                 return
+            digest = hashlib.sha256(tmp.read_bytes()).hexdigest()
+            if digest != MATHJAX_SHA256:
+                tmp.unlink(missing_ok=True)
+                self.failed.emit("下载内容校验失败 (SHA-256 不匹配)")
+                return
             tmp.replace(target)
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -205,6 +246,11 @@ class MathJaxDownloader(QThread):
 # One downloader for the whole process: several MathJaxViews created during
 # the first launch would otherwise each fetch their own 1MB copy in parallel.
 _shared_downloader: MathJaxDownloader | None = None
+
+
+def downloader_running() -> bool:
+    d = _shared_downloader
+    return d is not None and d.isRunning()
 
 
 # ---- widget ----------------------------------------------------------------
@@ -254,7 +300,7 @@ if WEBENGINE_AVAILABLE:
         # ---- internals ------------------------------------------------------
 
         def _render_or_download(self) -> None:
-            if is_ready():
+            if is_ready() or install_bundled():
                 self._load_page()
                 return
             self._load_placeholder("正在下载 MathJax (~1MB)，仅首次需要…")

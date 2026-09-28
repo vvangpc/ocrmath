@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/logo.png" width="112" alt="ocrmath logo"></p>
+
 # ocrmath
 
 > 自制 Mathpix Snipping Tool 替代品 — 调用 Mathpix API 实现截屏公式识别 + PDF 转 Markdown / DOCX。
@@ -100,7 +102,7 @@ python main.py
 │   ├── ab\
 │   │   └── ab12...ef.png
 │   └── cd\...
-└── mathjax\        # 首次联网下载的 tex-svg.js (~1MB) 与预览模板
+└── mathjax\        # tex-svg.js（安装版自带，首次启动复制；源码运行时联网下载）与预览模板
 ```
 
 ## 项目结构
@@ -118,10 +120,12 @@ api_common.py      # 两个 API client 共用的请求错误格式化
 storage.py         # SQLite 缓存 + 历史 + 使用记录 + PNG 文件管理
 config.py          # DPAPI 加密读写 + 快捷键 / 计价 / WebDAV 配置
 webdav.py          # WebDAV 同步 worker
-mathjax_view.py    # MathJax 3 + QWebEngineView 矢量渲染（首次从 jsdelivr 下载）
+mathjax_view.py    # MathJax 3 + QWebEngineView 矢量渲染（固定版本 + SHA-256 校验）
 settings_dialog.py # API key / 快捷键 / 计价 / WebDAV 设置对话框
 styles.py          # 全局 QSS 主题
-ui_icons.py        # 纯 Qt 绘制的矢量图标（带缓存）
+ui_icons.py        # 纯 Qt 绘制的矢量图标 + 应用 logo（按尺寸精修，带缓存）
+tools/make_icon.py # 由 logo 绘制代码生成 icon.ico 与 docs/logo.png
+tests/             # 单元测试（unittest：同步合并、PDF 计费、存储等）
 ```
 
 ## 自行打包
@@ -134,7 +138,22 @@ python -m PyInstaller build.spec --clean
 & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
 ```
 
-输出在 `dist\installer\ocrmath-setup-x.y.z.exe`。发版号在 `pyproject.toml` 与 `installer.iss` 两处，需保持一致。
+输出在 `dist\installer\ocrmath-setup-x.y.z.exe`。
+
+- 发版号只在 `pyproject.toml` 维护：`build.spec` 会把它写入 `installer\version.iss` 供 Inno Setup 使用，所以要先跑 PyInstaller 再编译安装包；CI 会拒绝与该版本号不一致的 tag。
+- `build.spec` 会把固定版本的 MathJax 下载到 `vendor\`（校验 SHA-256）并打进安装包，用户首次启动无需联网。
+- 运行依赖只在 `requirements.txt` 维护，`pyproject.toml` 从中读取。
+- 改了 `ui_icons.render_logo` 里的 logo 后，运行 `python tools/make_icon.py` 重新生成 `icon.ico` 和 `docs/logo.png`。
+
+## 测试
+
+单元测试只用标准库 `unittest`，无需额外安装，也不会碰真实配置或网络：
+
+```powershell
+python -m unittest discover -s tests -t .
+```
+
+CI 在打包前会先跑这些测试。
 
 ## API 烟雾测试（不打开 GUI）
 
@@ -148,7 +167,7 @@ python test_image_api.py path\to\equation.png
 python test_pdf_api.py path\to\small.pdf
 ```
 
-`storage.py` 带内置自测：`python storage.py --test`。
+`storage.py` 带内置自测：`python storage.py --test`（已包含在上面的单元测试中）。
 
 ## 故障排查
 
@@ -158,7 +177,7 @@ python test_pdf_api.py path\to\small.pdf
 | 全局热键不生效 | `keyboard` 库被杀软拦截，可用主窗口按钮替代；或在设置中改其他组合键 |
 | 401 / 403 | API Key 错，从托盘菜单 → 设置… 重填 |
 | PDF 进度条卡 0% | 网络问题；查看 PDF 标签页底部日志 |
-| LaTeX 预览空白 | 首次需联网下载 MathJax (~1MB) 至 `%APPDATA%\ocrmath\mathjax\`；如长时间空白请检查网络代理 |
+| LaTeX 预览空白 | 安装版自带 MathJax；源码运行首次需联网下载 (~2MB) 至 `%APPDATA%\ocrmath\mathjax\`，如长时间空白请检查网络代理 |
 | 多显示器截图错位 | 已按 `QGuiApplication.screens()` 多屏拼接，仍有问题请提 issue |
 
 ## 隐私说明

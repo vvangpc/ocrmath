@@ -246,11 +246,10 @@ class MainWindow(QMainWindow):
             pass
 
     def refresh_history_panel(self) -> None:
-        # Hidden panel reloads itself on showEvent, so refreshing it here
-        # would be wasted work.
+        """Storage changed: the panel rebuilds now if visible, else when next
+        shown."""
         try:
-            if self.history_panel.isVisible():
-                self.history_panel.refresh()
+            self.history_panel.invalidate()
         except Exception:
             pass
 
@@ -268,7 +267,7 @@ class MainWindow(QMainWindow):
     # ---- internal ----------------------------------------------------------
 
     def _on_tab_changed(self, idx: int) -> None:
-        # History refreshes itself in showEvent when its tab becomes current.
+        # History reloads itself in showEvent when its data changed.
         if self._tabs.widget(idx) is self.snip_tab:
             self.refresh_stats()
 
