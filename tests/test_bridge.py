@@ -5,16 +5,16 @@ from unittest import mock
 
 from PyQt6.QtWidgets import QApplication
 
-import bridge as bridge_module
-import config
-import settings_service
-import webdav
-from bridge import Bridge
-from llm_store import LlmStore
-from result_format import FloatModel
-from storage import Storage
+from ocrmath.ui import bridge as bridge_module
+from ocrmath.core import config
+from ocrmath.ui import settings_service
+from ocrmath.core import webdav
+from ocrmath.ui.bridge import Bridge
+from ocrmath.ocr.llm_store import LlmStore
+from ocrmath.ui.result_format import FloatModel
+from ocrmath.core.storage import Storage
 from tests.helpers import TempConfigTestCase
-from ui_utils import UserError
+from ocrmath.core.utils import UserError
 
 FORM = {"image_provider": "llm", "pdf_provider": "llm", "app_id": "", "app_key": "",
         "llm_api_key": "secret", "llm_model": "next-model",

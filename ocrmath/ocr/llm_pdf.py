@@ -9,10 +9,10 @@ import tempfile
 from pypdf import PdfReader, PdfWriter
 from PyQt6.QtCore import QThread, pyqtSignal
 
-import config
-from llm_client import cache_key, transcribe, PROMPT_VERSION
-from llm_store import LlmStore
-from pdf_client import _file_hash
+from ocrmath.core import config
+from ocrmath.ocr.llm_client import cache_key, transcribe, PROMPT_VERSION
+from ocrmath.ocr.llm_store import LlmStore
+from ocrmath.ocr.pdf_client import _file_hash
 
 
 def selected_pages(value: str | None, count: int) -> list[int]:

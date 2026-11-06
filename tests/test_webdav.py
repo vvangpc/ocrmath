@@ -4,10 +4,10 @@ import json
 import unittest
 from unittest import mock
 
-import config
-import counters
-import sync_crypto
-import webdav
+from ocrmath.core import config
+from ocrmath.core import counters
+from ocrmath.core import sync_crypto
+from ocrmath.core import webdav
 from tests.helpers import TempConfigTestCase
 
 WD = {"url": "https://dav.example", "user": "u", "password": "p",

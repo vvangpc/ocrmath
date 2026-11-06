@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/logo.png" width="112" alt="ocrmath logo"></p>
+<p align="center"><img src="assets/logo.png" width="112" alt="ocrmath logo"></p>
 
 # ocrmath
 
@@ -165,31 +165,34 @@ python main.py
 ## 项目结构
 
 ```
-main.py            # 入口：托盘 + 全局热键 + 缓存查找 + 信号串联 + 后台任务调度
-snipper.py         # 全屏半透明截图 widget（多显示器拼接）
-windows.py         # 浮窗与工具窗口：各承载一个 web/ 页面
-web/               # 界面：HTML / CSS / JS，只通过 bridge 调用后端
-bridge.py          # 页面与 Python 之间的唯一入口（QWebChannel + 方法白名单）
-result_format.py   # 浮窗状态与复制规则（不依赖界面）
-pdf_service.py     # PDF 任务流程：创建、恢复、计费、进度
-settings_service.py # 设置表单的校验与保存
-image_client.py    # /v3/text 调用 + QThread worker
-llm_client.py      # 可配置 Responses API 截图/页面识别
-llm_pdf.py         # PDF 分页、页面缓存、恢复及 Markdown 导出
-llm_store.py       # 大模型 token 账本与页面缓存
-pdf_client.py      # /v3/pdf 提交 / 轮询 / 下载 + QThread worker
-pdf_jobs.py        # 本机 PDF 任务持久化与恢复记录
-api_common.py      # 两个 API client 共用的请求错误格式化
-storage.py         # SQLite 缓存 + 历史 + 使用记录 + PNG 文件管理
-config.py          # DPAPI 加密读写 + 快捷键 / 计价 / WebDAV 配置
-webdav.py          # WebDAV 同步 worker
-sync_crypto.py     # 同步文件的本地加解密
-counters.py        # 历史基数与每设备增量的幂等合并
-mathjax_view.py    # MathJax 3 本地文件管理（固定版本 + SHA-256 校验）
-styles.py          # 托盘菜单与原生对话框的 QSS 主题
-ui_icons.py        # 纯 Qt 绘制的矢量图标 + 应用 logo（按尺寸精修，带缓存）
-tools/make_icon.py # 由 logo 绘制代码生成 icon.ico 与 docs/logo.png
-tests/             # 单元测试（unittest：同步合并、PDF 计费、存储等）
+main.py                # 启动入口
+ocrmath/
+├── app.py             # 托盘、全局快捷键、识别调度和后台同步
+├── core/              # 不依赖具体界面的基础能力
+│   ├── config.py      # DPAPI 加密的设置读写
+│   ├── storage.py     # SQLite 缓存、历史、使用记录和 PNG 文件
+│   ├── counters.py    # 多设备计数的幂等合并
+│   ├── webdav.py      # WebDAV 同步
+│   ├── sync_crypto.py # 同步文件的本地加解密
+│   └── utils.py       # 费用格式化和用户错误类型
+├── ocr/               # 识别服务
+│   ├── image_client.py、pdf_client.py  # Mathpix 接口
+│   ├── llm_client.py、llm_pdf.py       # 大模型 Responses API 与 PDF 逐页识别
+│   ├── llm_store.py   # 大模型 token 账本与页面缓存
+│   ├── pdf_jobs.py    # PDF 任务持久化
+│   └── pdf_service.py # PDF 任务流程：创建、恢复、计费、进度
+└── ui/                # 界面
+    ├── windows.py     # 浮窗与工具窗口
+    ├── bridge.py      # 页面与 Python 之间的唯一入口
+    ├── result_format.py、settings_service.py  # 浮窗规则与设置校验
+    ├── snipper.py     # 全屏截图选区
+    ├── mathjax_view.py、styles.py、ui_icons.py
+    └── web/           # HTML / CSS / JS 页面
+assets/                # 应用图标和 logo
+installer/             # Inno Setup 安装脚本与语言文件
+tools/                 # 生成图标、提取发布说明、手动 API 测试
+tests/                 # 单元测试
+build.spec             # PyInstaller 打包配置
 ```
 
 ## 自行打包
@@ -199,7 +202,7 @@ tests/             # 单元测试（unittest：同步合并、PDF 计费、存�
 ```powershell
 pip install pyinstaller
 python -m PyInstaller build.spec --clean
-& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\ocrmath.iss
 ```
 
 输出在 `dist\installer\ocrmath-setup-x.y.z.exe`。
@@ -207,7 +210,7 @@ python -m PyInstaller build.spec --clean
 - 发版号只在 `pyproject.toml` 维护：`build.spec` 会把它写入 `installer\version.iss` 供 Inno Setup 使用，所以要先跑 PyInstaller 再编译安装包；CI 会拒绝与该版本号不一致的 tag。
 - `build.spec` 会把固定版本的 MathJax 下载到 `vendor\`（校验 SHA-256）并打进安装包，用户首次启动无需联网。
 - 运行依赖只在 `requirements.txt` 维护，`pyproject.toml` 从中读取。
-- 改了 `ui_icons.render_logo` 里的 logo 后，运行 `python tools/make_icon.py` 重新生成 `icon.ico` 和 `docs/logo.png`。
+- 改了 `ocrmath/ui/ui_icons.py` 的 `render_logo` 里的 logo 后，运行 `python tools/make_icon.py` 重新生成 `assets/icon.ico` 和 `assets/logo.png`。
 
 ## 测试
 
@@ -221,17 +224,17 @@ CI 在打包前会先跑这些测试。
 
 ## API 烟雾测试（不打开 GUI）
 
-`test_image_api.py` / `test_pdf_api.py` 是需要真实凭证的手动冒烟脚本，非自动化单测：
+`tools/try_image_api.py` / `tools/try_pdf_api.py` 是需要真实凭证的手动冒烟脚本，非自动化单测：
 
 ```powershell
 $env:MATHPIX_APP_ID = "your_app_id"
 $env:MATHPIX_APP_KEY = "your_app_key"
 
-python test_image_api.py path\to\equation.png
-python test_pdf_api.py path\to\small.pdf
+python tools/try_image_api.py path\to\equation.png
+python tools/try_pdf_api.py path\to\small.pdf
 ```
 
-`storage.py` 带内置自测：`python storage.py --test`（已包含在上面的单元测试中）。
+`ocrmath/core/storage.py` 带内置自测：`python -m ocrmath.core.storage --test`（已包含在上面的单元测试中）。
 
 ## 故障排查
 

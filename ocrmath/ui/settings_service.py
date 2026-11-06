@@ -1,10 +1,10 @@
 """Validation and persistence of the settings form. No UI toolkit here."""
 from __future__ import annotations
 
-import config
-from llm_client import validate_endpoint
-from llm_store import LlmStore
-from ui_utils import UserError
+from ocrmath.core import config
+from ocrmath.ocr.llm_client import validate_endpoint
+from ocrmath.ocr.llm_store import LlmStore
+from ocrmath.core.utils import UserError
 
 _MODIFIERS = {"ctrl", "alt", "shift", "windows"}
 MIN_PASSPHRASE = 8

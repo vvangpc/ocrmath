@@ -6,15 +6,15 @@ from unittest import mock
 from PyQt6.QtWidgets import QApplication
 from pypdf import PdfWriter
 
-import config
-import webdav
-import llm_client
-from llm_client import transcribe, cache_key
-from llm_store import LlmStore
-from llm_pdf import LlmPdfWorker, selected_pages
-from pdf_jobs import PdfJobStore
-from pdf_service import PdfService
-from storage import Storage
+from ocrmath.core import config
+from ocrmath.core import webdav
+from ocrmath.ocr import llm_client
+from ocrmath.ocr.llm_client import transcribe, cache_key
+from ocrmath.ocr.llm_store import LlmStore
+from ocrmath.ocr.llm_pdf import LlmPdfWorker, selected_pages
+from ocrmath.ocr.pdf_jobs import PdfJobStore
+from ocrmath.ocr.pdf_service import PdfService
+from ocrmath.core.storage import Storage
 from tests.helpers import TempConfigTestCase
 
 SETTINGS = {"api_key": "test-secret", "model": "gpt-6-luna", "base_url": "https://api.openai.com/v1"}
@@ -283,7 +283,7 @@ class LlmPdfServiceTest(TempConfigTestCase):
                 time.sleep(.005)
             self.assertIsNone(service._worker)
         with mock.patch.object(llm_client.requests, "post", return_value=http()) as post, \
-             mock.patch("pdf_service.os.startfile", create=True):
+             mock.patch("ocrmath.ocr.pdf_service.os.startfile", create=True):
             service.start({"path": str(source), "provider": "llm", "page_ranges": "",
                            "out_dir": str(root / "out")})
             wait()

@@ -9,8 +9,8 @@ from urllib.parse import urlsplit
 import requests
 from PyQt6.QtCore import QThread, pyqtSignal
 
-import config
-from llm_store import LlmStore
+from ocrmath.core import config
+from ocrmath.ocr.llm_store import LlmStore
 
 PROMPT_VERSION = "ocr-v1"
 PROMPT = """Transcribe the supplied image or single PDF page faithfully into Markdown.

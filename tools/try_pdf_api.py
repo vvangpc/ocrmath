@@ -1,6 +1,6 @@
 """Manual smoke test for /v3/pdf. Usage:
 
-    python test_pdf_api.py path/to/input.pdf [out_dir]
+    python tools/try_pdf_api.py path/to/input.pdf [out_dir]
 
 Use a SMALL pdf (1-2 pages) to avoid wasting credits.
 """
@@ -11,12 +11,14 @@ import sys
 import time
 from pathlib import Path
 
-from pdf_client import PdfOptions, submit_file, get_status, download
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from ocrmath.ocr.pdf_client import PdfOptions, submit_file, get_status, download
 
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print("usage: python test_pdf_api.py <input.pdf> [out_dir]")
+        print("usage: python tools/try_pdf_api.py <input.pdf> [out_dir]")
         return 2
     pdf_path = Path(sys.argv[1])
     out_dir = Path(sys.argv[2]) if len(sys.argv) > 2 else pdf_path.parent / "out"
@@ -28,7 +30,7 @@ def main() -> int:
     app_key = os.environ.get("MATHPIX_APP_KEY")
     if not (app_id and app_key):
         try:
-            import config
+            from ocrmath.core import config
             creds = config.load()
             if creds:
                 app_id, app_key = creds["app_id"], creds["app_key"]

@@ -4,7 +4,7 @@ Pure functions + config dependency only — must not import Qt.
 """
 from __future__ import annotations
 
-import config
+from ocrmath.core import config
 
 
 class UserError(Exception):

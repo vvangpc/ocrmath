@@ -1,6 +1,6 @@
 import unittest
 
-import config
+from ocrmath.core import config
 from tests.helpers import TempConfigTestCase
 
 

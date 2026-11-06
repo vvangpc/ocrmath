@@ -62,11 +62,11 @@ jobs:
         run: choco install innosetup --no-progress -y
 
       # ChineseSimplified.isl is vendored at installer/ChineseSimplified.isl
-      # and referenced relative to installer.iss — no download step needed.
+      # and referenced from installer/ocrmath.iss — no download step needed.
       - name: Compile installer with Inno Setup
         shell: pwsh
         run: |
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\ocrmath.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
 
       - name: Upload installer artifact

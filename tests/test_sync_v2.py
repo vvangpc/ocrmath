@@ -1,9 +1,9 @@
 import copy
 from unittest import mock
 
-import config
-import counters
-import webdav
+from ocrmath.core import config
+from ocrmath.core import counters
+from ocrmath.core import webdav
 from tests.helpers import TempConfigTestCase
 from tests.test_webdav import FakeDav, V3, encrypted
 

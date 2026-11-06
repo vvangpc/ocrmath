@@ -1,20 +1,22 @@
 ; Inno Setup script for ocrmath
 ; Build the PyInstaller payload first:  python -m PyInstaller build.spec --clean
 ; Then compile this script with ISCC.exe:
-;   "C:\Users\<user>\AppData\Local\Programs\Inno Setup 6\ISCC.exe" installer.iss
+;   "C:\Users\<user>\AppData\Local\Programs\Inno Setup 6\ISCC.exe" installer\ocrmath.iss
 
 #define AppName        "ocrmath"
 ; The version comes from pyproject.toml: build.spec writes it to
 ; installer\version.iss, so run PyInstaller first. /DAppVersion=x.y.z on
 ; the ISCC command line overrides it.
 #ifndef AppVersion
-  #include "installer\version.iss"
+  #include "version.iss"
 #endif
 #define AppPublisher   "vvangpc"
 #define AppURL         "https://github.com/vvangpc/ocrmath"
 #define AppExe         "ocrmath.exe"
 
 [Setup]
+; Every relative path below starts from the repository root.
+SourceDir=..
 AppId={{6D4C3E8E-4B5A-4F2C-9D11-4F0E3A8E1B11}
 AppName={#AppName}
 AppVersion={#AppVersion}
@@ -28,7 +30,7 @@ DisableProgramGroupPage=yes
 LicenseFile=LICENSE
 OutputDir=dist\installer
 OutputBaseFilename=ocrmath-setup-{#AppVersion}
-SetupIconFile=icon.ico
+SetupIconFile=assets\icon.ico
 UninstallDisplayIcon={app}\{#AppExe}
 Compression=lzma2
 SolidCompression=yes

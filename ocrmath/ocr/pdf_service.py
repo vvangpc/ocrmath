@@ -9,12 +9,12 @@ from typing import Callable
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
-import config
-from llm_client import validate_endpoint
-from llm_pdf import LlmPdfWorker, selected_pages
-from pdf_client import PdfOptions, PdfWorker
-from pdf_jobs import PdfJobStore
-from ui_utils import UserError, format_cost
+from ocrmath.core import config
+from ocrmath.ocr.llm_client import validate_endpoint
+from ocrmath.ocr.llm_pdf import LlmPdfWorker, selected_pages
+from ocrmath.ocr.pdf_client import PdfOptions, PdfWorker
+from ocrmath.ocr.pdf_jobs import PdfJobStore
+from ocrmath.core.utils import UserError, format_cost
 
 # Asking before this many pages guards against an expensive slip.
 CONFIRM_PAGES = 100

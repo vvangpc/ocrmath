@@ -6,7 +6,7 @@ import sqlite3
 import time
 import uuid
 
-import config
+from ocrmath.core import config
 
 
 class PdfJobStore:
@@ -34,7 +34,7 @@ class PdfJobStore:
                          (job["id"], job["updated"], json.dumps(job, ensure_ascii=False)))
 
     def create_llm(self, source: Path, options: dict, out_dir: Path, settings: dict) -> dict:
-        from llm_client import PROMPT_VERSION
+        from ocrmath.ocr.llm_client import PROMPT_VERSION
         job = {"id": uuid.uuid4().hex, "source": str(source.resolve()),
                "options": options, "out_dir": str(out_dir.resolve()),
                "provider": "llm", "model": settings["model"],

@@ -5,7 +5,7 @@ import time
 import unittest
 from pathlib import Path
 
-import storage
+from ocrmath.core import storage
 
 
 class StorageTest(unittest.TestCase):

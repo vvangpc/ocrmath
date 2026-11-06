@@ -1,4 +1,4 @@
-"""Regenerate icon.ico (exe + installer icon) and docs/logo.png from the logo
+"""Regenerate assets/icon.ico (exe + installer icon) and assets/logo.png from the logo
 drawing code in ui_icons.render_logo, so every rendition of the logo comes
 from one source.
 
@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT))
 from PyQt6.QtCore import QBuffer, QIODevice  # noqa: E402
 from PyQt6.QtGui import QGuiApplication, QImage  # noqa: E402
 
-from ui_icons import LOGO_SIZES, render_logo  # noqa: E402
+from ocrmath.ui.ui_icons import LOGO_SIZES, render_logo  # noqa: E402
 
 
 def _png_bytes(img: QImage) -> bytes:
@@ -72,9 +72,9 @@ def build_ico(sizes=LOGO_SIZES) -> bytes:
 
 def main() -> int:
     _app = QGuiApplication(sys.argv)  # noqa: F841 — QPainter needs one
-    ico = ROOT / "icon.ico"
+    ico = ROOT / "assets" / "icon.ico"
     ico.write_bytes(build_ico())
-    logo = ROOT / "docs" / "logo.png"
+    logo = ROOT / "assets" / "logo.png"
     logo.parent.mkdir(exist_ok=True)
     render_logo(256).save(str(logo), "PNG")
     print(f"wrote {ico} and {logo}")

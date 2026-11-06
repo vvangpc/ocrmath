@@ -13,8 +13,8 @@ from typing import Callable
 import requests
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from api_common import format_request_error
-from pdf_jobs import PdfJobStore
+from ocrmath.ocr.api_common import format_request_error
+from ocrmath.ocr.pdf_jobs import PdfJobStore
 
 API_BASE = "https://api.mathpix.com/v3/pdf"
 

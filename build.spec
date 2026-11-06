@@ -5,12 +5,12 @@ Build with:
     python -m PyInstaller build.spec --clean
 
 Produces dist/ocrmath/ocrmath.exe (onedir layout).
-The Inno Setup installer (installer.iss) bundles the whole dist/ocrmath/
+The Inno Setup installer (installer/ocrmath.iss) bundles the whole dist/ocrmath/
 folder into the user-installable setup .exe.
 
 Side outputs (both gitignored):
   vendor/tex-svg.js      pinned MathJax, bundled so first launch is offline
-  installer/version.iss  AppVersion from pyproject.toml for installer.iss
+  installer/version.iss  AppVersion from pyproject.toml for ocrmath.iss
 """
 import hashlib
 import re
@@ -22,7 +22,7 @@ from PyInstaller.utils.hooks import collect_submodules
 
 ROOT = Path(SPECPATH)
 sys.path.insert(0, str(ROOT))
-from mathjax_view import MATHJAX_FILENAME, MATHJAX_SHA256, MATHJAX_URL  # noqa: E402
+from ocrmath.ui.mathjax_view import MATHJAX_FILENAME, MATHJAX_SHA256, MATHJAX_URL  # noqa: E402
 
 block_cipher = None
 
@@ -72,7 +72,7 @@ hiddenimports = (
 
 # mathjax_view.bundled_path() looks for it under <_MEIPASS>/mathjax/, and
 # windows.web_dir() for the pages under <_MEIPASS>/web/.
-datas = [(str(_vendored_mathjax()), "mathjax"), (str(ROOT / "web"), "web")]
+datas = [(str(_vendored_mathjax()), "mathjax"), (str(ROOT / "ocrmath" / "ui" / "web"), "web")]
 
 a = Analysis(
     ["main.py"],
@@ -113,7 +113,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon="icon.ico",
+    icon="assets/icon.ico",
 )
 
 coll = COLLECT(

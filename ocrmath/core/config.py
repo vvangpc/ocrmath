@@ -23,7 +23,7 @@ import threading
 import time
 from pathlib import Path
 from typing import TypedDict
-import counters
+from ocrmath.core import counters
 
 DEFAULT_HOTKEY = "ctrl+alt+m"
 DEFAULT_IMAGE_PRICE = 0.002
