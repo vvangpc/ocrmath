@@ -1,17 +1,19 @@
 """WebDAV sync layer for OCRMath.
 
-Synchronizes a small JSON blob (API key + counters + prices) so the user
+Synchronizes a small JSON blob (API keys + counters + prices) so the user
 can share state across machines via their own WebDAV server (Nextcloud,
-JianGuoYun, hacdias/webdav, etc.).
-
-Envelope on the wire:
-    {"version": 2, "synced_at": <epoch>, "data": {...}}
+JianGuoYun, hacdias/webdav, etc.). The blob is encrypted here before upload
+and decrypted here after download; see sync_crypto.py.
 
 Conflict resolution (see merge()):
     counters: shared legacy baseline + per-device grow-only components
-    creds + prices + rate: last-write-wins by settings_modified_at (when the
-    user last edited them), carried inside `data`; remote files written by
-    older versions lack it and fall back to the envelope's synced_at
+    creds + LLM settings + prices + rate: last-write-wins by
+    settings_modified_at (when the user last edited them), carried inside the
+    data; files written by older versions lack it and fall back to their
+    envelope's synced_at
+
+Older versions wrote plaintext files (sync.v2.json and the configured path).
+Every sync merges any it finds and deletes them once the encrypted copy is up.
 """
 from __future__ import annotations
 
@@ -27,6 +29,8 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
 import config
 import counters
+import sync_crypto
+from sync_crypto import SyncPassphraseError
 
 
 # Process-wide lock so manual + auto sync don't race on PUT.
@@ -40,6 +44,11 @@ class SyncConflict(RuntimeError):
 def _v2_path(path: str) -> str:
     path = path or config.DEFAULT_WEBDAV_PATH
     return path[:-5] + ".v2.json" if path.endswith(".json") else path + ".v2.json"
+
+
+def _v3_path(path: str) -> str:
+    path = path or config.DEFAULT_WEBDAV_PATH
+    return path[:-5] + ".v3.json" if path.endswith(".json") else path + ".v3.json"
 
 
 def _build_url(base: str, remote_path: str) -> str:
@@ -139,7 +148,8 @@ def download(url: str, user: str, pw: str, remote_path: str,
         raise RuntimeError(f"下载失败 HTTP {r.status_code}: {r.text[:200]}")
     try:
         value = json.loads(r.content.decode("utf-8"))
-        if not isinstance(value, dict) or not isinstance(value.get("data"), dict):
+        if not isinstance(value, dict) or not (
+                isinstance(value.get("data"), dict) or isinstance(value.get("ciphertext"), str)):
             raise ValueError("同步文件结构无效")
     except Exception as exc:
         raise RuntimeError(f"远端 JSON 解析失败: {exc}") from None
@@ -147,6 +157,17 @@ def download(url: str, user: str, pw: str, remote_path: str,
     if with_etag and (not etag or etag.startswith("W/")):
         raise RuntimeError("WebDAV 未提供强 ETag，无法安全合并多机写入；请启用服务器 ETag 支持")
     return (value, etag) if with_etag else value
+
+
+def delete(url: str, user: str, pw: str, remote_path: str,
+           timeout: float = 15) -> bool:
+    """Remove a remote file. True if it is gone afterwards."""
+    try:
+        r = requests.delete(_build_url(url, remote_path),
+                            auth=HTTPBasicAuth(user, pw), timeout=timeout)
+    except requests.RequestException:
+        return False
+    return 200 <= r.status_code < 300 or r.status_code == 404
 
 
 def test_connection(url: str, user: str, pw: str,
@@ -193,47 +214,72 @@ def merge(local_data: dict, local_ts: float,
     return out
 
 
-def sync_once(wd: dict | None = None) -> float:
-    """Download → merge → upload. Returns the new synced_at epoch.
+def _plaintext_files(wd: dict) -> list[tuple[str, dict, float]]:
+    """Files left by older versions, as (path, data, edit time)."""
+    found = []
+    for path in (_v2_path(wd["path"]), wd["path"] or config.DEFAULT_WEBDAV_PATH):
+        env = download(wd["url"], wd["user"], wd["password"], path)
+        if env is None or not isinstance(env.get("data"), dict):
+            continue
+        data = env["data"]
+        if env.get("version") == 2 and "counter_state" not in data:
+            raise RuntimeError("旧版同步文件缺少设备计数，未覆盖远端文件")
+        found.append((path, data,
+                      float(data.get("settings_modified_at", env.get("synced_at", 0)) or 0)))
+    return found
 
-    `wd` overrides the stored WebDAV settings (used by the settings dialog
+
+def sync_once(wd: dict | None = None, *, overwrite: bool = False) -> float:
+    """Download → decrypt → merge → encrypt → upload. Returns the new
+    synced_at epoch.
+
+    `wd` overrides the stored WebDAV settings (used by the settings page
     so "sync now" works on unsaved form values without persisting them).
-    Raises RuntimeError if WebDAV is not configured or the network call fails.
+    `overwrite` replaces a remote file that can't be decrypted, for a forgotten
+    passphrase; other devices merge their data back once they use the new one.
+    Raises RuntimeError if WebDAV is not configured or the network call fails,
+    and SyncPassphraseError if the remote file can't be decrypted.
     """
     wd = wd or config.get_webdav()
     if not wd["url"] or not wd["user"]:
         raise RuntimeError("WebDAV 未配置")
+    passphrase = wd.get("passphrase") or ""
+    if not passphrase:
+        raise RuntimeError("请先在设置中填写同步口令")
 
     if not _SYNC_LOCK.acquire(blocking=False):
         raise RuntimeError("另一次同步正在进行")
     try:
-        path = _v2_path(wd["path"])
+        path = _v3_path(wd["path"])
         for attempt in range(4):
             local_data = config.get_syncable_payload()
             local_ts = float(local_data["settings_modified_at"])
             remote_env, etag = download(
                 wd["url"], wd["user"], wd["password"], path, with_etag=True)
-            if remote_env is not None and remote_env.get("version") != 2:
+            if remote_env is not None and remote_env.get("version") != sync_crypto.VERSION:
                 raise RuntimeError("不支持的同步协议版本，未覆盖远端文件")
-            if remote_env is not None and "counter_state" not in remote_env["data"]:
-                raise RuntimeError("新版同步文件缺少设备计数，未覆盖远端文件")
-            if remote_env is None:
-                # Import the old shared baseline once; old clients never write
-                # the v2 resource, so they cannot erase device components.
-                remote_env = download(wd["url"], wd["user"], wd["password"], wd["path"])
             merged = dict(local_data)
-            if remote_env is not None:
-                remote_data = remote_env["data"]
-                remote_ts = remote_data.get("settings_modified_at",
-                                            remote_env.get("synced_at", 0))
-                merged = merge(local_data, local_ts, remote_data, float(remote_ts or 0))
+            merged_ts = local_ts
+            if remote_env is not None and not overwrite:
+                remote_data = sync_crypto.decrypt(remote_env, passphrase)
+                merged = merge(merged, merged_ts, remote_data,
+                               float(remote_data.get("settings_modified_at", 0) or 0))
+                merged_ts = float(merged["settings_modified_at"])
+            old_files = _plaintext_files(wd)
+            for _old_path, old_data, old_ts in old_files:
+                merged = merge(merged, merged_ts, old_data, old_ts)
+                merged_ts = float(merged["settings_modified_at"])
             now = time.time()
             try:
                 upload(wd["url"], wd["user"], wd["password"], path,
-                       {"version": 2, "synced_at": now, "data": merged}, etag=etag)
+                       sync_crypto.encrypt(merged, passphrase), etag=etag)
             except SyncConflict:
                 continue
             config.apply_synced_payload(merged, now, base_modified_at=local_ts)
+            # Only now is everything in the old files safely in the new one.
+            left = [p for p, _d, _t in old_files
+                    if not delete(wd["url"], wd["user"], wd["password"], p)]
+            config.update_ui_state(remote_plaintext_left=left)
             return now
         raise RuntimeError("远端连续发生写入冲突，请稍后重试同步")
     finally:
@@ -282,14 +328,15 @@ class WebDavSyncWorker(QThread):
     finished_ok = pyqtSignal(float)   # synced_at epoch
     failed = pyqtSignal(str)
 
-    def __init__(self, wd: dict | None = None, parent=None):
+    def __init__(self, wd: dict | None = None, parent=None, *, overwrite: bool = False):
         super().__init__(parent)
         self._wd = wd
+        self._overwrite = overwrite
         _keep_alive(self)
 
     def run(self) -> None:
         try:
-            ts = sync_once(self._wd)
+            ts = sync_once(self._wd, overwrite=self._overwrite)
         except Exception as exc:
             self.failed.emit(str(exc))
             return

@@ -20,15 +20,14 @@ from PyQt6.QtWidgets import (
 import config
 import mathjax_view
 import webdav
+from bridge import Bridge
 from image_client import ImageOcrWorker
 from llm_client import LlmImageWorker, cache_key
-from main_window import MainWindow
-from result_window import ResultWindow
-from settings_dialog import SettingsDialog
 from snipper import Snipper
 from storage import Storage, Recognition
 from styles import apply_theme, ACCENT
 from ui_icons import app_icon, icon
+from windows import FloatWindow, ToolWindow
 
 
 # The app lives in the tray for days, so the startup purge alone would let
@@ -95,7 +94,6 @@ class App(QObject):
         self._worker: ImageOcrWorker | LlmImageWorker | None = None
         self._sync_worker: webdav.WebDavSyncWorker | None = None
         self._exit_sync_worker: webdav.WebDavSyncWorker | None = None
-        self._settings_dlg: SettingsDialog | None = None
 
         self._periodic_timer = QTimer(self)
         self._periodic_timer.setSingleShot(False)
@@ -118,23 +116,11 @@ class App(QObject):
 
         # Widgets
         self.snipper = Snipper()
-        self.result_win = ResultWindow(
-            on_recapture=self.on_snip, on_retry=self._retry_last_image,
-            on_open_pdf=lambda: self._open_tool("pdf"),
-            on_open_history=lambda: self._open_tool("history"),
-            on_open_usage=lambda: self._open_tool("usage"),
-            on_open_settings=self.open_settings,
-            on_provider_changed=self._on_image_provider_changed)
-        self.main_win = MainWindow(
-            on_snip=self.on_snip,
-            on_open_settings=self.open_settings,
-            get_creds=self._get_creds,
-            storage=self.storage,
-            on_open_history=self._on_history_open,
-            on_sync_now=self._sync_now_manual,
-            on_show_result=self._show_main,
-        )
-        self.main_win.pdf_panel.activity_finished.connect(self._refresh_task_count)
+        self.bridge_web = Bridge(self)
+        self.result_win = FloatWindow(self.bridge_web)
+        self.main_win = ToolWindow(self.bridge_web, self.storage, self._get_creds,
+                                   on_show_result=self._show_main)
+        self.main_win.pdf_service.activity_finished.connect(self._refresh_task_count)
         self._refresh_task_count()
 
         self.snipper.captured.connect(self._on_captured)
@@ -170,25 +156,10 @@ class App(QObject):
         return config.load()
 
     def open_settings(self) -> None:
-        # Re-entrant calls (hotkey / tray while the modal dialog is open)
-        # bring the open one forward instead of stacking another.
-        if self._settings_dlg is not None:
-            self._settings_dlg.raise_()
-            self._settings_dlg.activateWindow()
-            return
-        parent = self.main_win if self.main_win.isVisible() else self.result_win
-        dlg = SettingsDialog(parent, on_purge_now=self._purge_now)
-        dlg.settings_changed.connect(self._on_settings_changed)
-        self._settings_dlg = dlg
-        try:
-            dlg.exec()
-        finally:
-            self._settings_dlg = None
-            # Parented to main_win, so without this every open leaks one.
-            dlg.deleteLater()
+        self._open_tool("settings")
 
     def _purge_now(self, days: int) -> int:
-        """Synchronous purge invoked from the settings dialog. Usage/cost
+        """Synchronous purge invoked from the settings page. Usage/cost
         records are kept, like clear_all(): the monthly summary needs them."""
         n = self.storage.purge_older_than(days)
         try:
@@ -262,15 +233,8 @@ class App(QObject):
         self.result_win.hide()
         self.main_win.show_page(page)
 
-    def _on_image_provider_changed(self) -> None:
-        self.main_win.refresh_hotkey_display()
-
     def _refresh_task_count(self) -> None:
-        jobs = self.main_win.pdf_panel._jobs.recent()
-        count = sum(j.get("status") != "已完成"
-                    and bool(j.get("pdf_id") or j.get("provider") == "llm")
-                    for j in jobs)
-        self.result_win.set_task_count(count)
+        self.result_win.set_task_count(self.main_win.pdf_service.active_count())
 
     def _on_second_instance(self) -> None:
         while (conn := self._instance_server.nextPendingConnection()) is not None:
@@ -284,7 +248,7 @@ class App(QObject):
         threads = [self._worker, self._sync_worker, self._exit_sync_worker]
         if any(t is not None and t.isRunning() for t in threads):
             return True
-        return (self.main_win.pdf_panel.is_busy()
+        return (self.main_win.pdf_service.is_busy()
                 or webdav.any_running()
                 or mathjax_view.downloader_running())
 
@@ -373,8 +337,7 @@ class App(QObject):
             return
         if not config.has_image_credentials():
             self.open_settings()
-            if not config.has_image_credentials():
-                return
+            return
         self._snipping = True
         self.result_win.hide()
         self.main_win.hide()
@@ -527,7 +490,7 @@ class App(QObject):
 
     def _webdav_configured(self) -> bool:
         wd = config.get_webdav()
-        return bool(wd["url"] and wd["user"])
+        return bool(wd["url"] and wd["user"] and wd["passphrase"])
 
     def _reconfigure_periodic_timer(self) -> None:
         """(Re)start or stop the periodic-sync QTimer based on settings.
@@ -577,9 +540,10 @@ class App(QObject):
     def _sync_now_manual(self) -> None:
         wd = config.get_webdav()
         if not wd["url"] or not wd["user"]:
-            QMessageBox.information(
-                None, "WebDAV 未配置",
-                "请先在设置中填写 WebDAV 服务器 URL 和用户名。")
+            self.main_win.notify("WebDAV 未配置", "请先在设置中填写 WebDAV 服务器 URL 和用户名。")
+            return
+        if not wd["passphrase"]:
+            self.main_win.notify("需要同步口令", "同步数据现在会先加密再上传。请先在设置的“同步”页填写同步口令。")
             return
         if self._sync_worker is not None:
             return
@@ -598,7 +562,7 @@ class App(QObject):
         sys.stderr.write(f"webdav auto-sync failed: {msg}\n")
 
     def _on_sync_fail_manual(self, msg: str) -> None:
-        QMessageBox.warning(None, "同步失败", msg)
+        self.main_win.notify("同步失败", msg)
 
     def _sync_cleanup(self) -> None:
         try:

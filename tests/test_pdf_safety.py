@@ -5,11 +5,15 @@ from pathlib import Path
 from unittest import mock
 
 import requests
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtWidgets import QApplication
+from pypdf import PdfWriter
 
+import config
 import pdf_client
-from pdf_panel import PdfPanel
+from pdf_service import PdfService
 from pdf_jobs import PdfJobStore
+from tests.helpers import TempConfigTestCase
+from ui_utils import UserError
 
 
 class DownloadSafetyTest(unittest.TestCase):
@@ -91,43 +95,98 @@ class DownloadSafetyTest(unittest.TestCase):
         billed.assert_not_called()
 
 
-class PdfPanelSafetyTest(unittest.TestCase):
+class PdfServiceSafetyTest(TempConfigTestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.panel = PdfPanel(lambda: {"app_id": "id", "app_key": "key"},
-                              job_store=PdfJobStore(Path(tmp.name) / "jobs.db"))
-        self.addCleanup(self.panel.deleteLater)
+        super().setUp()
+        self.root = config.CONFIG_PATH.parent
+        self.service = PdfService(lambda: {"app_id": "id", "app_key": "key"},
+                                  job_store=PdfJobStore(self.root / "jobs.db"))
+        self.addCleanup(self.service.deleteLater)
+        self.path = self.root / "paper.pdf"
+        writer = PdfWriter()
+        for _ in range(3):
+            writer.add_blank_page(100, 100)
+        writer.write(self.path)
+        self.params = {"path": str(self.path), "provider": "mathpix", "formats": ["mmd"],
+                       "page_ranges": "", "out_dir": str(self.root / "out")}
 
-    def test_empty_custom_range_does_not_start_whole_document(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "paper.pdf"
-            path.write_bytes(b"test")
-            self.panel._pdf_path = path
-            self.panel.range_combo.setCurrentIndex(1)
-            with mock.patch("pdf_panel.PdfWorker") as worker, \
-                 mock.patch.object(QMessageBox, "warning") as warning:
-                self.panel._start()
+    def test_invalid_range_does_not_start_anything(self):
+        for value in ("9", "2-1", "a"):
+            with mock.patch("pdf_service.PdfWorker") as worker, self.assertRaises(UserError):
+                self.service.start({**self.params, "page_ranges": value})
             worker.assert_not_called()
-            warning.assert_called_once()
+        self.assertEqual(self.service.jobs.recent(), [])
+
+    def test_no_format_or_unknown_format_is_refused(self):
+        for formats in ([], ["exe"]):
+            with self.assertRaises(UserError):
+                self.service.start({**self.params, "formats": formats})
+
+    def test_large_job_asks_first_and_creates_nothing_until_confirmed(self):
+        with mock.patch("pdf_service.count_pdf_pages", return_value=101), \
+             mock.patch("pdf_service.PdfWorker") as worker:
+            reply = self.service.start(self.params)
+            self.assertIn("101", reply["confirm"])
+            worker.assert_not_called()
+            self.assertEqual(self.service.jobs.recent(), [])
+
+    def test_estimate_honors_the_page_range(self):
+        whole = self.service.estimate(str(self.path), "mathpix")
+        part = self.service.estimate(str(self.path), "mathpix", "1")
+        self.assertIn("0.015", whole)
+        self.assertIn("0.005", part)
+        self.assertIn("Token", self.service.estimate(str(self.path), "llm", "1"))
+
+    def test_inspect_defaults_output_next_to_the_file_and_refuses_others(self):
+        info = self.service.inspect(str(self.path))
+        self.assertEqual((info["pages"], info["out_dir"]), (3, str(self.root)))
+        with self.assertRaises(UserError):
+            self.service.inspect(str(self.root / "note.txt"))
+
+    def test_options_are_remembered_only_once_a_job_really_starts(self):
+        chosen = self.root / "chosen"
+        params = {**self.params, "formats": ["docx"], "rm_spaces": False, "out_dir": str(chosen)}
+        with self.assertRaises(UserError):
+            self.service.start({**params, "page_ranges": "9"})
+        self.assertIsNone(self.service.inspect(str(self.path))["formats"])
+        with mock.patch("pdf_service.PdfWorker"), mock.patch.object(self.service, "_launch"):
+            self.service.start(params)
+        self.service._worker = None
+        info = self.service.inspect(str(self.path))
+        self.assertEqual((info["formats"], info["rm_spaces"], info["out_dir"]),
+                         (["docx"], False, str(chosen)))
+
+    def test_default_folder_is_not_remembered_and_a_missing_one_is_ignored(self):
+        with mock.patch("pdf_service.PdfWorker"), mock.patch.object(self.service, "_launch"):
+            self.service.start({**self.params, "out_dir": str(self.root)})
+        self.assertIsNone(config.get_ui_state()["pdf_out_dir"])
+        config.update_ui_state(pdf_out_dir=str(self.root / "gone"))
+        self.assertEqual(self.service.inspect(str(self.path))["out_dir"], str(self.root))
 
     def test_completion_opens_actual_output_directory(self):
-        self.panel.out_edit.setText("changed-after-start")
-        with mock.patch.object(QMessageBox, "information"), \
-             mock.patch("pdf_panel.os.startfile", create=True) as open_folder:
-            self.panel._on_done([Path("actual-output/paper.mmd")])
+        with mock.patch("pdf_service.os.startfile", create=True) as open_folder:
+            self.service._on_done([Path("actual-output/paper.mmd")])
         open_folder.assert_called_once_with(Path("actual-output"))
 
     def test_cleanup_releases_parented_worker(self):
         worker = mock.Mock()
-        self.panel._worker = worker
-        self.panel._cleanup_worker()
+        self.service._worker = worker
+        self.service._cleanup_worker()
         worker.deleteLater.assert_called_once()
-        self.assertIsNone(self.panel._worker)
+        self.assertIsNone(self.service._worker)
+
+    def test_job_left_running_by_a_closed_app_reads_as_interrupted(self):
+        job = self.service.jobs.create(self.path, {"formats": ["mmd"]}, self.root, "id")
+        job.update(pdf_id="server", status="处理中")
+        self.service.jobs.save(job)
+        view = self.service.state()["jobs"][0]
+        self.assertEqual(view["status"], "已中断")
+        self.assertTrue(view["can_resume"])
+        self.assertFalse(view["running"])
 
 
 if __name__ == "__main__":

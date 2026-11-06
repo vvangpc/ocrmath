@@ -7,7 +7,8 @@ Windows-first, the fallback is just to keep dev tools usable on other OSes.
 Stored fields:
     app_id, app_key (required), hotkey (optional),
     image_count, pdf_page_count, image_price_usd, pdf_price_usd, usd_cny_rate,
-    webdav_url, webdav_user, webdav_password, webdav_path,
+    llm_api_key, llm_model, llm_base_url, llm_prices,
+    webdav_url, webdav_user, webdav_password, webdav_path, sync_passphrase,
     webdav_sync_interval, cache_retention_days, usage_backfilled,
     settings_modified_at, last_synced_at
 """
@@ -53,9 +54,12 @@ class Settings(TypedDict, total=False):
     image_price_usd: float
     pdf_price_usd: float
     usd_cny_rate: float            # display conversion, USD -> CNY
+    llm_prices: dict               # model -> USD per million tokens
+    ui_state: dict                 # remembered window and option state, per device
     webdav_url: str
     webdav_user: str
     webdav_password: str
+    sync_passphrase: str           # encrypts the WebDAV file; never uploaded
     webdav_path: str
     webdav_sync_interval: int      # minutes; 0 = no periodic timer
     cache_retention_days: int      # 0 = no auto-purge
@@ -138,7 +142,8 @@ def _read_blob() -> bytes | None:
 
 _STR_KEYS = ("image_provider", "pdf_provider", "llm_api_key", "llm_model", "llm_base_url",
              "device_id", "app_id", "app_key", "hotkey",
-             "webdav_url", "webdav_user", "webdav_password", "webdav_path")
+             "webdav_url", "webdav_user", "webdav_password", "webdav_path",
+             "sync_passphrase")
 _INT_KEYS = ("image_count", "pdf_page_count",
              "webdav_sync_interval", "cache_retention_days")
 _FLOAT_KEYS = ("image_price_usd", "pdf_price_usd", "usd_cny_rate",
@@ -184,6 +189,10 @@ def load_all() -> Settings:
         out.update(counters.fields(counters.state(data)))
     if isinstance(data.get("pdf_job_pages"), dict):
         out["pdf_job_pages"] = data["pdf_job_pages"]
+    if isinstance(data.get("llm_prices"), dict):
+        out["llm_prices"] = data["llm_prices"]
+    if isinstance(data.get("ui_state"), dict):
+        out["ui_state"] = data["ui_state"]
     _SETTINGS_CACHE = (blob, copy.deepcopy(out))
     return out
 
@@ -212,6 +221,22 @@ def get_llm() -> dict:
             "base_url": (s.get("llm_base_url") or DEFAULT_LLM_BASE_URL).rstrip("/")}
 
 
+def get_llm_prices() -> dict[str, dict[str, float]]:
+    """Valid per-model prices (USD per million tokens). Entries that arrived
+    malformed, e.g. through WebDAV, count as unpriced instead of raising."""
+    out = {}
+    for model, price in (load_all().get("llm_prices") or {}).items():
+        if not isinstance(price, dict):
+            continue
+        try:
+            values = {k: float(price[k]) for k in ("input", "cached", "output")}
+        except (KeyError, TypeError, ValueError):
+            continue
+        if all(0 <= v < float("inf") for v in values.values()):
+            out[model] = values
+    return out
+
+
 def has_image_credentials() -> bool:
     return bool(get_llm()["api_key"]) if get_provider() == "llm" else bool(load())
 
@@ -234,6 +259,19 @@ def save_settings(values: dict, drop: tuple[str, ...] = ()) -> None:
         cur.update(values)  # type: ignore[typeddict-item]
         for k in drop:
             cur.pop(k, None)  # type: ignore[misc]
+        save_all(cur)
+
+
+def get_ui_state() -> dict:
+    return load_all().get("ui_state") or {}
+
+
+def update_ui_state(**values) -> None:
+    """Remember UI choices on this device. Never synced: a window position
+    or output folder means nothing on another machine."""
+    with _LOCK:
+        cur = load_all()
+        cur["ui_state"] = {**(cur.get("ui_state") or {}), **values}
         save_all(cur)
 
 
@@ -322,6 +360,7 @@ def get_webdav() -> dict:
         "url": s.get("webdav_url", "") or "",
         "user": s.get("webdav_user", "") or "",
         "password": s.get("webdav_password", "") or "",
+        "passphrase": s.get("sync_passphrase", "") or "",
         "path": s.get("webdav_path", "") or DEFAULT_WEBDAV_PATH,
         "interval": int(s.get("webdav_sync_interval", 0) or 0),
     }
@@ -365,6 +404,7 @@ def get_modified_at() -> float:
 # last-write-wins by settings_modified_at.
 COUNTER_KEYS = ("image_count", "pdf_page_count")
 LWW_KEYS = ("app_id", "app_key",
+            "llm_api_key", "llm_model", "llm_base_url", "llm_prices",
             "image_price_usd", "pdf_price_usd", "usd_cny_rate")
 
 
@@ -381,6 +421,8 @@ def get_syncable_payload() -> dict:
     if not (s.get("app_id") and s.get("app_key")):
         out.pop("app_id", None)
         out.pop("app_key", None)
+    if not s.get("llm_api_key"):
+        out.pop("llm_api_key", None)
     out["counter_state"] = copy.deepcopy(s["counter_state"])
     out.setdefault("image_count", 0)
     out.setdefault("pdf_page_count", 0)

@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 import requests
 from PyQt6.QtCore import QThread, pyqtSignal
 
+import config
 from llm_store import LlmStore
 
 PROMPT_VERSION = "ocr-v1"
@@ -64,7 +65,11 @@ def transcribe(data: bytes, settings: dict, kind: str, store: LlmStore) -> dict:
         raise RuntimeError("大模型返回了无效响应")
     request_id = body.get("id") or uuid.uuid4().hex
     event_id = hashlib.sha256(f"{endpoint}\0{request_id}".encode()).hexdigest()
-    store.record(event_id, body.get("model") or settings["model"], kind, body.get("usage"))
+    # Services may answer with a dated model ID; fall back to the requested one.
+    model = body.get("model") or settings["model"]
+    prices = config.get_llm_prices()
+    cost = store.record(event_id, model, kind, body.get("usage"),
+                        price=prices.get(model) or prices.get(settings["model"]))
     if body.get("status") != "completed":
         raise RuntimeError("模型输出未完成（可能达到输出限制），本次 token 已记录；请重试该页")
     parts = []
@@ -87,9 +92,11 @@ def transcribe(data: bytes, settings: dict, kind: str, store: LlmStore) -> dict:
         latex = text[2:-2].strip()
     elif re.fullmatch(r"\$[^$]+\$", text, re.DOTALL):
         latex = text[1:-1].strip()
-    return {"text": text, "latex_styled": latex, "request_id": request_id,
-            "_provider": "llm", "model": body.get("model") or settings["model"],
-            "usage": body.get("usage") or {}}
+    result = {"text": text, "latex_styled": latex, "request_id": request_id,
+              "_provider": "llm", "model": model, "usage": body.get("usage") or {}}
+    if cost is not None:
+        result["_cost_usd"] = cost
+    return result
 
 
 class LlmImageWorker(QThread):

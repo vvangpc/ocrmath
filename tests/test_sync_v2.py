@@ -1,12 +1,11 @@
 import copy
-import json
 from unittest import mock
 
 import config
 import counters
 import webdav
 from tests.helpers import TempConfigTestCase
-from tests.test_webdav import WD
+from tests.test_webdav import FakeDav, V3, encrypted
 
 
 class CounterV2Test(TempConfigTestCase):
@@ -64,39 +63,33 @@ class CounterV2Test(TempConfigTestCase):
         config.bump_image_count(2)
         other = {"image_count": 0}
         counters.increment(other, "other", "image_count", 3)
-        env = {"version": 2, "data": other}
-        with mock.patch.object(webdav, "download", side_effect=[(None, None), None, (env, '"new"')]), \
-             mock.patch.object(webdav, "upload", side_effect=[webdav.SyncConflict(), None]) as put:
-            webdav.sync_once(WD)
+        dav = FakeDav()
+        dav.conflicts = 1
+        reads = []
+        def another_device_writes():
+            reads.append(1)
+            if len(reads) == 2:
+                dav.files[V3] = encrypted(other)
+        dav.during = another_device_writes
+        dav.sync()
         self.assertEqual(config.get_counters()[0], 5)
-        self.assertEqual(put.call_args.kwargs["etag"], '"new"')
-        self.assertEqual(put.call_args.args[3], "/ocrmath/sync.v2.json")
-        self.assertEqual(put.call_args.args[4]["data"]["image_count"], 5)
+        self.assertEqual(dav.etags, [None, '"etag"'])
+        self.assertEqual(dav.puts, [V3])
+        self.assertEqual(dav.plain()["image_count"], 5)
 
     def test_failed_upload_does_not_mark_synced(self):
-        with mock.patch.object(webdav, "download", return_value=(None, None)) as get, \
-             mock.patch.object(webdav, "upload", side_effect=RuntimeError("offline")):
-            get.side_effect = [(None, None), None]
+        dav = FakeDav()
+        with mock.patch.object(dav, "upload", side_effect=RuntimeError("offline")):
             with self.assertRaises(RuntimeError):
-                webdav.sync_once(WD)
+                dav.sync()
         self.assertEqual(config.get_last_synced(), 0)
 
     def test_conflict_retries_are_bounded(self):
-        env = {"version": 2, "data": counters.fields(counters.state({}))}
-        with mock.patch.object(webdav, "download", return_value=(env, '"etag"')), \
-             mock.patch.object(webdav, "upload", side_effect=webdav.SyncConflict()) as put:
-            with self.assertRaisesRegex(RuntimeError, "连续"):
-                webdav.sync_once(WD)
-        self.assertEqual(put.call_count, 4)
-
-    def test_legacy_remote_import_keeps_old_file_untouched(self):
-        config.save_all({"image_count": 10})
-        old = {"version": 1, "data": {"image_count": 12}}
-        with mock.patch.object(webdav, "download", side_effect=[(None, None), old]), \
-             mock.patch.object(webdav, "upload") as put:
-            webdav.sync_once(WD)
-        self.assertEqual(config.get_counters()[0], 12)
-        self.assertEqual(put.call_args.args[3], "/ocrmath/sync.v2.json")
+        dav = FakeDav({V3: encrypted(counters.fields(counters.state({})))})
+        dav.conflicts = 99
+        with self.assertRaisesRegex(RuntimeError, "连续"):
+            dav.sync()
+        self.assertEqual(len(dav.etags), 4)
 
     def test_put_uses_conditions_and_reports_conflicts(self):
         response = mock.Mock(status_code=204)

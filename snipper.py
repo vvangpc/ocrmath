@@ -105,7 +105,10 @@ class Snipper(QWidget):
         if not inner.isEmpty():
             p.drawPixmap(inner, self._screenshot,
                          _to_device_rect(inner, self._screenshot))
-        p.setPen(QPen(QColor(255, 90, 0), 2))
+        # Black and white together stay visible over any screen content.
+        p.setPen(QPen(QColor(0, 0, 0), 2))
+        p.drawRect(sel)
+        p.setPen(QPen(QColor(255, 255, 255), 1))
         p.drawRect(sel)
         # Size label
         label = f"{sel.width()} x {sel.height()}"

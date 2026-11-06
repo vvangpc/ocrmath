@@ -67,10 +67,12 @@ hiddenimports = (
     collect_submodules("keyboard")
     + collect_submodules("PyQt6.QtWebEngineCore")
     + collect_submodules("PyQt6.QtWebEngineWidgets")
+    + collect_submodules("PyQt6.QtWebChannel")
 )
 
-# mathjax_view.bundled_path() looks for it under <_MEIPASS>/mathjax/.
-datas = [(str(_vendored_mathjax()), "mathjax")]
+# mathjax_view.bundled_path() looks for it under <_MEIPASS>/mathjax/, and
+# windows.web_dir() for the pages under <_MEIPASS>/web/.
+datas = [(str(_vendored_mathjax()), "mathjax"), (str(ROOT / "web"), "web")]
 
 a = Analysis(
     ["main.py"],

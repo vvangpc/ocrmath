@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src file: qrc:; style-src file: 'unsafe-inline'; img-src file: data:; font-src file: data:">
+<title>OCRmath</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body class="tool">
+<header class="tool-head">
+  <span class="logo" data-logo aria-hidden="true"></span>
+  <nav class="tabs" id="tabs">
+    <button data-page="pdf">PDF</button>
+    <button data-page="history">历史</button>
+    <button data-page="usage">用量</button>
+    <button data-page="settings">设置</button>
+  </nav>
+  <button class="quiet" id="back" data-icon="arrow-back-up">返回浮窗</button>
+</header>
+
+<main class="tool-main">
+<section class="page" id="page-pdf" hidden>
+  <div class="drop" id="drop" role="button" tabindex="0"><span data-icon="file-upload" class="drop-icon"></span><div>把 PDF 拖到这里，或点击选择</div></div>
+  <div id="pdfOptions" hidden>
+    <div class="spread"><div><strong id="pdfName"></strong> <span class="muted" id="pdfPages"></span></div><button class="quiet" id="pdfClear" data-icon="x">换一个</button></div>
+    <div class="form-row"><label>识别服务</label><div class="seg" id="pdfProvider" role="group" aria-label="PDF 识别服务">
+      <button data-value="mathpix" data-icon="math-function">Mathpix</button>
+      <button data-value="llm" data-icon="sparkles">大模型</button>
+    </div></div>
+    <div class="form-row" id="pdfFormats"><label>输出格式</label><div class="checks">
+      <label><input type="checkbox" value="mmd" checked>MMD</label>
+      <label><input type="checkbox" value="md" checked>Markdown</label>
+      <label><input type="checkbox" value="docx" checked>Word</label>
+      <label><input type="checkbox" value="tex.zip">LaTeX ZIP</label>
+      <label><input type="checkbox" value="html">HTML</label>
+      <label><input type="checkbox" value="pdf">带文字层 PDF</label>
+      <label><input type="checkbox" id="pdfRmSpaces" checked>删除公式多余空格</label>
+    </div></div>
+    <div class="form-row"><label for="pdfRange">页面范围</label><input id="pdfRange" placeholder="全部页面，或 2,4-6"></div>
+    <div class="form-row"><label for="pdfOut">输出目录</label><div class="input-action"><input id="pdfOut"><button class="quiet" id="pdfBrowse" data-icon="folder">浏览</button></div></div>
+    <div class="error indent" id="pdfError"></div>
+    <div class="spread gap-top"><span class="small" id="pdfEstimate"></span><button class="primary" id="pdfStart">开始转换</button></div>
+  </div>
+  <div class="section-title">任务</div>
+  <div id="jobs"></div>
+</section>
+
+<section class="page" id="page-history" hidden>
+  <input id="historyQuery" type="search" placeholder="搜索 LaTeX 或文本">
+  <div id="historyList" class="gap-top"></div>
+  <div class="spread line-top"><span class="muted" id="historyStats"></span><button class="quiet" id="historyClear">清空缓存</button></div>
+</section>
+
+<section class="page" id="page-usage" hidden>
+  <div class="spread start"><div><div class="big" id="usageTotal"></div><div class="small" id="usageCny"></div></div>
+    <div class="seg" id="usagePeriod" role="group" aria-label="统计范围"><button data-value="today">今日</button><button data-value="month">本月</button><button data-value="all">全部</button></div></div>
+  <div class="section-title">明细</div>
+  <table class="table"><tbody id="usageDetail"></tbody></table>
+  <div class="section-title">大模型 Token</div>
+  <table class="table"><thead><tr><th>模型</th><th>请求</th><th>输入</th><th>缓存输入</th><th>输出</th><th>费用</th></tr></thead><tbody id="usageModels"></tbody></table>
+  <div class="muted gap-small" id="usageNote"></div>
+  <div class="section-title">多设备累计</div>
+  <div class="spread"><span id="usageDevices"></span><div class="group"><span class="muted" id="usageSynced"></span><button class="quiet" id="usageSync" data-icon="refresh"><span id="usageSyncLabel">立即同步</span></button></div></div>
+</section>
+
+<section class="page compact" id="page-settings" hidden>
+  <div class="spread"><div class="seg" id="settingsTabs" role="group" aria-label="设置分组"><button data-value="service">识别服务</button><button data-value="prefs">偏好与单价</button><button data-value="sync">同步</button></div><div class="group"><span class="small" id="settingsSaved"></span><button class="primary mini" id="settingsSave">保存</button></div></div>
+  <div class="error gap-small" id="settingsError"></div>
+
+  <div class="settings-tab" data-tab="service">
+    <div class="grid2 gap-top">
+      <div class="field"><label>截图</label><div class="seg" id="setImage" role="group" aria-label="截图识别服务"><button data-value="mathpix" data-icon="math-function">Mathpix</button><button data-value="llm" data-icon="sparkles">大模型</button></div></div>
+      <div class="field"><label>PDF</label><div class="seg" id="setPdf" role="group" aria-label="PDF 识别服务"><button data-value="mathpix" data-icon="math-function">Mathpix</button><button data-value="llm" data-icon="sparkles">大模型</button></div></div>
+    </div>
+    <div class="section-small">Mathpix</div>
+    <div class="grid2">
+      <div class="field"><label for="appId">App ID</label><input id="appId" autocomplete="off"></div>
+      <div class="field"><label for="appKey">App Key</label><div class="secret"><input id="appKey" type="password" autocomplete="off"><button class="quiet" data-reveal="appKey" data-icon="eye" aria-label="显示密钥"></button></div></div>
+    </div>
+    <div class="section-small">大模型</div>
+    <div class="grid2">
+      <div class="field"><label for="llmKey">API Key</label><div class="secret"><input id="llmKey" type="password" autocomplete="off"><button class="quiet" data-reveal="llmKey" data-icon="eye" aria-label="显示密钥"></button></div></div>
+      <div class="field"><label for="llmModel">模型</label><input id="llmModel" placeholder="gpt-6-luna" autocomplete="off"></div>
+      <div class="field span2"><label for="llmUrl">Base URL</label><input id="llmUrl" autocomplete="off"></div>
+    </div>
+    <div class="right gap-small"><button class="quiet" id="clearCreds">清除已存凭证</button></div>
+  </div>
+
+  <div class="settings-tab" data-tab="prefs">
+    <div class="grid2 gap-top">
+      <div class="field"><label for="hotkey">快捷键</label><div class="input-action"><input id="hotkey" readonly title="点击后按下组合键"><button class="quiet" id="hotkeyReset">默认</button></div></div>
+      <div class="field"><label for="retention">保留历史</label><div class="input-action"><input id="retention" class="short" inputmode="numeric"><span class="small grow">天</span><button class="quiet" id="purgeNow">立即清理</button></div></div>
+    </div>
+    <div class="section-small spread"><span>Mathpix 单价（美元）</span><button class="quiet" id="pricesReset">恢复默认</button></div>
+    <div class="grid3">
+      <div class="field narrow"><label for="imagePrice">截图</label><input id="imagePrice" inputmode="decimal"></div>
+      <div class="field narrow"><label for="pdfPrice">PDF</label><input id="pdfPrice" inputmode="decimal"></div>
+      <div class="field narrow"><label for="rate">汇率</label><input id="rate" inputmode="decimal"></div>
+    </div>
+    <div class="section-small">大模型单价（美元 / 百万 Token）</div>
+    <table class="table tight"><thead><tr><th>模型</th><th>输入</th><th>缓存输入</th><th>输出</th></tr></thead><tbody id="priceRows"></tbody></table>
+    <div class="muted gap-small">改价只影响之后的请求，历史费用不变。</div>
+  </div>
+
+  <div class="settings-tab" data-tab="sync">
+    <div class="grid2 gap-top">
+      <div class="field span2"><label for="wdUrl">服务器</label><input id="wdUrl" placeholder="https://example.com/dav" autocomplete="off"></div>
+      <div class="field"><label for="wdUser">用户名</label><input id="wdUser" autocomplete="off"></div>
+      <div class="field"><label for="wdPass">密码</label><div class="secret"><input id="wdPass" type="password" autocomplete="off"><button class="quiet" data-reveal="wdPass" data-icon="eye" aria-label="显示密码"></button></div></div>
+      <div class="field"><label for="wdPath">远程路径</label><input id="wdPath" autocomplete="off"></div>
+      <div class="field"><label for="wdInterval">同步间隔</label><div class="input-action"><input id="wdInterval" class="short" inputmode="numeric"><span class="small grow">分钟，0 为不定时</span></div></div>
+      <div class="field span2"><label for="wdPhrase">同步口令</label><div class="secret"><input id="wdPhrase" type="password" autocomplete="off" placeholder="至少 8 位，每台设备填同一个"><button class="quiet" data-reveal="wdPhrase" data-icon="eye" aria-label="显示口令"></button></div></div>
+    </div>
+    <div class="spread gap-small"><span class="muted" id="wdStatus"></span><div class="group"><button class="quiet" id="wdTest">测试连接</button><button class="quiet" id="wdSync">立即同步</button></div></div>
+    <div class="muted gap-small">同步数据在本机加密后才上传，服务器上只有密文。忘记口令就无法恢复远端数据，请自行保管。</div>
+    <div class="error gap-small" id="wdPlaintext"></div>
+  </div>
+</section>
+</main>
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+<script src="icons.js"></script>
+<script src="common.js"></script>
+<script src="tool.js"></script>
+</body>
+</html>

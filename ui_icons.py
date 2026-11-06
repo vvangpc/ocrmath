@@ -5,8 +5,8 @@ import math
 
 from PyQt6.QtCore import QPointF, QRectF, Qt
 from PyQt6.QtGui import (
-    QBrush, QColor, QIcon, QImage, QLinearGradient, QPainter, QPainterPath,
-    QPen, QPixmap, QRadialGradient, QGuiApplication, QPalette,
+    QColor, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap,
+    QGuiApplication, QPalette,
 )
 
 INK = "#263238"
@@ -26,19 +26,12 @@ def _pixmap(size: int) -> tuple[QPixmap, QPainter]:
 
 # ---- app logo --------------------------------------------------------------
 #
-# Dark squircle tile carrying an orange radical over a white x (√x). Detail is
-# size-adaptive: below 32px the gloss, glow and shadow go, strokes get
-# heavier and the vinculum is snapped to the pixel grid so the tray icon stays
-# crisp at 16px. tools/make_icon.py renders icon.ico from this same code.
+# Near-black squircle tile carrying a white integral sign. Below 32px the tile
+# goes full-bleed and the stroke gets relatively heavier so the tray icon stays
+# readable at 16px. web/common.js draws the same glyph, and tools/make_icon.py
+# renders icon.ico from this code.
 
 LOGO_SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
-
-# Unit-space geometry: radical (tick, valley, apex, vinculum end) and the
-# two strokes of the x, with a slight italic lean.
-_RADICAL = ((0.185, 0.555), (0.28, 0.505), (0.405, 0.755), (0.545, 0.265),
-            (0.815, 0.265))
-_X_STROKES = (((0.612, 0.43), (0.752, 0.635)),
-              ((0.768, 0.43), (0.596, 0.635)))
 
 
 def _squircle(rect: QRectF, n: float) -> QPainterPath:
@@ -60,16 +53,6 @@ def _squircle(rect: QRectF, n: float) -> QPainterPath:
     return path
 
 
-def _stroke(painter: QPainter, pts, width: float, brush: QBrush) -> None:
-    painter.setPen(QPen(brush, width, Qt.PenStyle.SolidLine,
-                        Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-    painter.setBrush(Qt.BrushStyle.NoBrush)
-    path = QPainterPath(QPointF(*pts[0]))
-    for pt in pts[1:]:
-        path.lineTo(QPointF(*pt))
-    painter.drawPath(path)
-
-
 def render_logo(size: int, *, opacity: float = 1.0) -> QImage:
     """Draw the app logo at `size` x `size` px."""
     img = QImage(size, size, QImage.Format.Format_ARGB32_Premultiplied)
@@ -84,62 +67,30 @@ def render_logo(size: int, *, opacity: float = 1.0) -> QImage:
     pad = 0.0 if small else s * 0.035
     n = 4.2 if small else 5.0
     rect = QRectF(pad, pad, s - 2 * pad, s - 2 * pad)
-    shape = _squircle(rect, n)
-    bg = QLinearGradient(rect.topLeft(), rect.bottomLeft())
-    bg.setColorAt(0, QColor("#3b4354"))
-    bg.setColorAt(1, QColor("#161a23"))
     p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(bg)
-    p.drawPath(shape)
-    if not small:
-        p.save()
-        p.setClipPath(shape)
-        glow = QRadialGradient(QPointF(0.5 * s, 0.56 * s), 0.46 * s)
-        glow.setColorAt(0, QColor(255, 122, 26, 46))
-        glow.setColorAt(1, QColor(255, 122, 26, 0))
-        p.setBrush(glow)
-        p.drawRect(rect)
-        sheen = QLinearGradient(0, rect.top(), 0, rect.top() + rect.height() / 2)
-        sheen.setColorAt(0, QColor(255, 255, 255, 34))
-        sheen.setColorAt(1, QColor(255, 255, 255, 0))
-        p.setBrush(sheen)
-        p.drawRect(rect)
-        p.restore()
+    p.setBrush(QColor("#17181a"))
+    p.drawPath(_squircle(rect, n))
     # Light rim keeps the dark tile's edge readable on dark taskbars.
     rw = 1.0 if small else max(1.0, s / 128)
     p.setBrush(Qt.BrushStyle.NoBrush)
     p.setPen(QPen(QColor(255, 255, 255, 52 if small else 44), rw))
     p.drawPath(_squircle(rect.adjusted(rw / 2, rw / 2, -rw / 2, -rw / 2), n))
 
-    orange = QLinearGradient(0.18 * s, 0, 0.82 * s, 0)
-    orange.setColorAt(0, QColor("#ffc766"))
-    orange.setColorAt(1, QColor("#ff6a00"))
-    white = QBrush(QColor("white"))
+    # The glyph lives in a 24-unit box: two curls joined by a slanted stem.
+    scale = (0.92 if small else 0.78) * s / 24
+    offset = (s - 24 * scale) / 2
 
-    if small:
-        w = 2.0 if size <= 20 else 2.5
-        vin_y = round(s * 0.27 - w / 2) + w / 2  # top edge on a pixel row
-        radical = [(0.2 * s, 0.575 * s), (0.28 * s, 0.53 * s),
-                   (0.4 * s, 0.8 * s), (0.53 * s, vin_y), (0.86 * s, vin_y)]
-        _stroke(p, radical, w, QBrush(orange))
-        xw = max(1.5, w * 0.8)
-        top, bottom = vin_y + w / 2 + xw * 0.9, 0.8 * s
-        left, right = 0.6 * s, 0.83 * s
-        _stroke(p, [(left, top), (right, bottom)], xw, white)
-        _stroke(p, [(right, top), (left, bottom)], xw, white)
-    else:
-        def scaled(pts):
-            return [(x * s, y * s) for x, y in pts]
-        # A touch heavier at mid sizes so strokes keep >= 2.5px at 32.
-        w = 0.072 * s + (0.9 if s <= 48 else 0.0)
-        xw = 0.066 * s + (0.8 if s <= 48 else 0.0)
-        p.save()
-        p.translate(0, 0.016 * s)
-        _stroke(p, scaled(_RADICAL), w, QBrush(QColor(0, 0, 0, 80)))
-        p.restore()
-        _stroke(p, scaled(_RADICAL), w, QBrush(orange))
-        for stroke in _X_STROKES:
-            _stroke(p, scaled(stroke), xw, white)
+    def pt(x: float, y: float) -> QPointF:
+        return QPointF(offset + x * scale, offset + y * scale)
+
+    glyph = QPainterPath(pt(16.6, 4.3))
+    glyph.cubicTo(pt(14.7, 3.3), pt(12.9, 4.1), pt(12.5, 6.5))
+    glyph.lineTo(pt(10.7, 17.5))
+    glyph.cubicTo(pt(10.3, 19.9), pt(8.5, 20.7), pt(6.6, 19.7))
+    width = max(1.6, s * (0.115 if small else 0.075))
+    p.setPen(QPen(QColor("white"), width, Qt.PenStyle.SolidLine,
+                  Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+    p.drawPath(glyph)
     p.end()
     return img
 
