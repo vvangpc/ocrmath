@@ -77,33 +77,31 @@ class HistoryRow(QWidget):
         thumb_lbl = QLabel("…")
         thumb_lbl.setFixedSize(96, 56)
         thumb_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        thumb_lbl.setStyleSheet(
-            "background:#fafafa; border:1px solid #e2e2e2; border-radius:4px;"
-        )
+        thumb_lbl.setObjectName("historyThumb")
         thumb_lbl.setProperty("role", "muted")
         self._thumb_lbl = thumb_lbl
 
         # Header line: timestamp + confidence
         header = QHBoxLayout()
         ts_lbl = QLabel(_fmt_ts(rec.created_at))
-        ts_lbl.setStyleSheet("color:#666;")
+        ts_lbl.setProperty("role", "muted")
         header.addWidget(ts_lbl)
         header.addStretch(1)
         if rec.confidence is not None:
-            conf_lbl = QLabel(f"♻ {rec.confidence * 100:.0f}%")
-            conf_lbl.setStyleSheet("color:#888;")
+            conf_lbl = QLabel(f"置信度 {rec.confidence * 100:.0f}%")
+            conf_lbl.setProperty("role", "muted")
             header.addWidget(conf_lbl)
 
         # LaTeX preview line
         latex_text = rec.latex or rec.text or "(空)"
         latex_lbl = QLabel(_truncate(f"${latex_text}$" if rec.latex else latex_text))
         latex_lbl.setStyleSheet(
-            "font-family: Consolas, monospace; color:#333; padding:2px 0;"
+            "font-family: Consolas, monospace; padding:2px 0;"
         )
         latex_lbl.setWordWrap(True)
 
         # Action buttons
-        copy_btn = QPushButton("复制 LaTeX")
+        copy_btn = QPushButton("复制 LaTeX" if rec.latex else "复制 Markdown")
         copy_btn.setIcon(icon("copy"))
         copy_btn.setIconSize(QSize(15, 15))
         copy_btn.setFixedHeight(28)
@@ -147,10 +145,18 @@ class HistoryRow(QWidget):
         self._thumb_lbl.setPixmap(thumb)
 
     def _copy(self) -> None:
-        latex = self.rec.latex or self.rec.text
-        if not latex:
+        if self.rec.latex:
+            latex = self.rec.latex.strip()
+            if latex.startswith("$$") and latex.endswith("$$"):
+                latex = latex[2:-2].strip()
+            elif latex.startswith("$") and latex.endswith("$"):
+                latex = latex[1:-1].strip()
+            text = f"${latex}$"
+        else:
+            text = self.rec.text
+        if not text:
             return
-        QGuiApplication.clipboard().setText(f"${latex}$")
+        QGuiApplication.clipboard().setText(text)
 
 
 class HistoryPanel(QWidget):

@@ -14,24 +14,37 @@ Stored fields:
 from __future__ import annotations
 
 import json
+import copy
+import uuid
 import os
 import sys
 import threading
 import time
 from pathlib import Path
 from typing import TypedDict
+import counters
 
 DEFAULT_HOTKEY = "ctrl+alt+m"
 DEFAULT_IMAGE_PRICE = 0.002
 DEFAULT_PDF_PRICE = 0.005
 DEFAULT_USD_CNY_RATE = 7.0
 DEFAULT_WEBDAV_PATH = "/ocrmath/sync.json"
+DEFAULT_LLM_MODEL = "gpt-6-luna"
+DEFAULT_LLM_BASE_URL = "https://api.openai.com/v1"
 
 # Guards read-modify-write cycles for counter bumps and sync writes.
 _LOCK = threading.RLock()
 
 
 class Settings(TypedDict, total=False):
+    image_provider: str
+    pdf_provider: str
+    llm_api_key: str
+    llm_model: str
+    llm_base_url: str
+    device_id: str
+    counter_state: dict
+    pdf_job_pages: dict
     app_id: str
     app_key: str
     hotkey: str
@@ -123,7 +136,8 @@ def _read_blob() -> bytes | None:
     return plain
 
 
-_STR_KEYS = ("app_id", "app_key", "hotkey",
+_STR_KEYS = ("image_provider", "pdf_provider", "llm_api_key", "llm_model", "llm_base_url",
+             "device_id", "app_id", "app_key", "hotkey",
              "webdav_url", "webdav_user", "webdav_password", "webdav_path")
 _INT_KEYS = ("image_count", "pdf_page_count",
              "webdav_sync_interval", "cache_retention_days")
@@ -146,7 +160,7 @@ def load_all() -> Settings:
         return {}
     cached = _SETTINGS_CACHE
     if cached is not None and cached[0] is blob:
-        return dict(cached[1])  # shallow copy: callers mutate the result
+        return copy.deepcopy(cached[1])
     try:
         data = json.loads(blob.decode())
     except Exception:
@@ -166,7 +180,11 @@ def load_all() -> Settings:
     for k in _BOOL_KEYS:
         if k in data and isinstance(data[k], bool):
             out[k] = data[k]  # type: ignore[literal-required]
-    _SETTINGS_CACHE = (blob, dict(out))
+    if "counter_state" in data:
+        out.update(counters.fields(counters.state(data)))
+    if isinstance(data.get("pdf_job_pages"), dict):
+        out["pdf_job_pages"] = data["pdf_job_pages"]
+    _SETTINGS_CACHE = (blob, copy.deepcopy(out))
     return out
 
 
@@ -178,9 +196,24 @@ def save_all(settings: Settings) -> None:
 def load() -> dict | None:
     """Backward-compat: return creds dict {app_id, app_key} or None."""
     s = load_all()
-    if "app_id" in s and "app_key" in s:
+    if s.get("app_id") and s.get("app_key"):
         return {"app_id": s["app_id"], "app_key": s["app_key"]}
     return None
+
+
+def get_provider(kind: str = "image") -> str:
+    return "llm" if load_all().get(f"{kind}_provider") == "llm" else "mathpix"
+
+
+def get_llm() -> dict:
+    s = load_all()
+    return {"api_key": s.get("llm_api_key", ""),
+            "model": s.get("llm_model") or DEFAULT_LLM_MODEL,
+            "base_url": (s.get("llm_base_url") or DEFAULT_LLM_BASE_URL).rstrip("/")}
+
+
+def has_image_credentials() -> bool:
+    return bool(get_llm()["api_key"]) if get_provider() == "llm" else bool(load())
 
 
 def save(app_id: str, app_key: str) -> None:
@@ -243,9 +276,12 @@ def get_counters() -> tuple[int, int]:
 
 
 def bump_image_count(n: int = 1) -> None:
+    if n <= 0:
+        return
     with _LOCK:
         cur = load_all()
-        cur["image_count"] = int(cur.get("image_count", 0) or 0) + int(n)
+        _ensure_counters(cur)
+        counters.increment(cur, cur["device_id"], "image_count", n)
         save_all(cur)
 
 
@@ -254,8 +290,28 @@ def bump_pdf_pages(n: int) -> None:
         return
     with _LOCK:
         cur = load_all()
-        cur["pdf_page_count"] = int(cur.get("pdf_page_count", 0) or 0) + int(n)
+        _ensure_counters(cur)
+        counters.increment(cur, cur["device_id"], "pdf_page_count", n)
         save_all(cur)
+
+
+def _ensure_counters(cur: dict) -> None:
+    cur.setdefault("device_id", uuid.uuid4().hex)
+    cur.update(counters.fields(counters.state(cur)))
+
+
+def record_pdf_pages(job_id: str, total: int) -> int:
+    """Atomically count only newly observed pages of a persistent PDF job."""
+    with _LOCK:
+        cur = load_all()
+        _ensure_counters(cur)
+        jobs = cur.setdefault("pdf_job_pages", {})
+        delta = max(0, total - jobs.get(job_id, 0))
+        if delta:
+            counters.increment(cur, cur["device_id"], "pdf_page_count", delta)
+            jobs[job_id] = total
+            save_all(cur)
+        return delta
 
 
 # ---- webdav ----------------------------------------------------------------
@@ -305,7 +361,7 @@ def get_modified_at() -> float:
 
 # ---- sync payload ----------------------------------------------------------
 
-# Synced fields, by merge rule: counters take the max, the rest are
+# Synced fields: counters merge per-device components, the rest are
 # last-write-wins by settings_modified_at.
 COUNTER_KEYS = ("image_count", "pdf_page_count")
 LWW_KEYS = ("app_id", "app_key",
@@ -316,8 +372,16 @@ def get_syncable_payload() -> dict:
     """Fields that travel through WebDAV. Excludes hotkey + webdav creds.
     Carries settings_modified_at so the other side can tell which copy of
     the last-write-wins fields was edited more recently."""
-    s = load_all()
+    with _LOCK:
+        s = load_all()
+        if "counter_state" not in s or "device_id" not in s:
+            _ensure_counters(s)
+            save_all(s)
     out: dict = {k: s[k] for k in COUNTER_KEYS + LWW_KEYS if k in s}
+    if not (s.get("app_id") and s.get("app_key")):
+        out.pop("app_id", None)
+        out.pop("app_key", None)
+    out["counter_state"] = copy.deepcopy(s["counter_state"])
     out.setdefault("image_count", 0)
     out.setdefault("pdf_page_count", 0)
     out.setdefault("image_price_usd", DEFAULT_IMAGE_PRICE)
@@ -333,16 +397,14 @@ def apply_synced_payload(merged: dict, synced_at: float,
 
     `merged` was computed from a snapshot taken before the network
     round-trip, so writes that landed since then must not be clobbered:
-    counters keep the larger value (a bump mid-sync survives), and the
+    counter components merge again (a bump mid-sync survives), and the
     last-write-wins fields are applied only if settings_modified_at still
     equals `base_modified_at` — otherwise the user saved newer settings
     mid-sync, and the next sync pushes them."""
     with _LOCK:
         cur = load_all()
-        for k in COUNTER_KEYS:
-            if k in merged:
-                cur[k] = max(int(cur.get(k, 0) or 0),  # type: ignore[literal-required]
-                             int(merged[k] or 0))
+        _ensure_counters(cur)
+        cur.update(counters.merge(cur, merged))
         if _modified_at(cur) == base_modified_at:
             for k in LWW_KEYS:
                 if k in merged:

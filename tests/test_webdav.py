@@ -2,6 +2,7 @@ import unittest
 from unittest import mock
 
 import config
+import counters
 import webdav
 from tests.helpers import TempConfigTestCase
 
@@ -50,7 +51,12 @@ class SyncOnceTest(TempConfigTestCase):
         def fake_download(*_a, **_k):
             if during:
                 during()
-            return remote_env
+            if _k.get("with_etag"):
+                env = {**remote_env, "version": 2} if remote_env else None
+                if env:
+                    env["data"] = {**env["data"], **counters.fields(counters.state(env["data"]))}
+                return env, '"v1"' if env else None
+            return None
 
         def fake_upload(_url, _user, _pw, _path, payload, **_k):
             uploaded.update(payload)

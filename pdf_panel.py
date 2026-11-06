@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import os
 import sys
+from dataclasses import asdict
 from pathlib import Path
 from typing import Callable
 
-from PyQt6.QtCore import QSize, Qt
+from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QCheckBox,
@@ -16,6 +17,8 @@ from PyQt6.QtWidgets import (
 
 import config
 from pdf_client import PdfOptions, PdfWorker
+from pdf_jobs import PdfJobStore
+from llm_pdf import LlmPdfWorker
 from ui_icons import icon
 from ui_utils import format_cost
 
@@ -33,37 +36,51 @@ def _count_pdf_pages(p: Path) -> int | None:
 
 
 class PdfPanel(QWidget):
+    activity_finished = pyqtSignal()
     def __init__(self, get_creds: Callable[[], dict | None],
-                 on_pages_processed: Callable[[int], None] | None = None,
-                 parent=None):
+                 on_pages_processed: Callable[[int, str | None], None] | None = None,
+                 parent=None, *, job_store: PdfJobStore | None = None):
         super().__init__(parent)
         self._get_creds = get_creds
         self._on_pages_processed = on_pages_processed
         self._pdf_path: Path | None = None
         self._page_count: int | None = None
         self._billing_page_count: int | None = None
-        self._worker: PdfWorker | None = None
+        self._worker: PdfWorker | LlmPdfWorker | None = None
+        self._jobs = job_store or PdfJobStore()
         self.setAcceptDrops(True)
         self._build_ui()
+        self._provider_changed()
+        self._refresh_jobs()
 
     def is_busy(self) -> bool:
         return self._worker is not None and self._worker.isRunning()
 
     def refresh_price_display(self) -> None:
         """Recompute the cost label after the user changes pricing."""
-        if self._pdf_path:
-            self._update_file_labels()
+        if self._worker is not None:
+            return
+        self.provider_combo.blockSignals(True)
+        self.provider_combo.setCurrentIndex(self.provider_combo.findData(config.get_provider("pdf")))
+        self.provider_combo.blockSignals(False)
+        self._provider_changed()
 
     # ---- UI ----------------------------------------------------------------
 
     def _build_ui(self) -> None:
+        self.provider_combo = QComboBox()
+        self.provider_combo.addItem("Mathpix", "mathpix")
+        self.provider_combo.addItem("大模型 · Markdown", "llm")
+        self.provider_combo.setCurrentIndex(self.provider_combo.findData(config.get_provider("pdf")))
+        self.provider_combo.currentIndexChanged.connect(self._choose_provider)
         # Drop target — styled via QSS [role="dropzone"]
-        self.drop_label = QLabel("📄  将 PDF 文件拖到这里")
+        self.drop_label = QLabel("将 PDF 文件拖到这里")
         self.drop_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.drop_label.setProperty("role", "dropzone")
         self.drop_label.setMinimumHeight(72)
 
         pick_btn = QPushButton("选择 PDF…")
+        self.pick_btn = pick_btn
         pick_btn.setIcon(icon("pdf"))
         pick_btn.setIconSize(QSize(16, 16))
         pick_btn.clicked.connect(self._pick_file)
@@ -73,10 +90,11 @@ class PdfPanel(QWidget):
 
         # Format checkboxes
         fmt_box = QGroupBox("输出格式")
+        self.format_box = fmt_box
         self.cb_mmd = QCheckBox("MMD")
-        self.cb_md = QCheckBox("MD")
-        self.cb_docx = QCheckBox("DOCX")
-        self.cb_tex = QCheckBox("tex.zip")
+        self.cb_md = QCheckBox("Markdown")
+        self.cb_docx = QCheckBox("Word")
+        self.cb_tex = QCheckBox("LaTeX ZIP")
         self.cb_html = QCheckBox("HTML")
         self.cb_pdf_overlay = QCheckBox("带文字层 PDF")
         self.cb_mmd.setChecked(True)
@@ -103,6 +121,7 @@ class PdfPanel(QWidget):
 
         self.out_edit = QLineEdit()
         out_browse = QPushButton("浏览…")
+        self.out_browse = out_browse
         out_browse.setIcon(icon("folder"))
         out_browse.setIconSize(QSize(16, 16))
         out_browse.clicked.connect(self._pick_out_dir)
@@ -134,7 +153,7 @@ class PdfPanel(QWidget):
         self.start_btn.setIcon(icon("play", "white"))
         self.start_btn.setIconSize(QSize(17, 17))
         self.start_btn.clicked.connect(self._start)
-        self.cancel_btn = QPushButton("取消")
+        self.cancel_btn = QPushButton("停止等待")
         self.cancel_btn.setIcon(icon("close"))
         self.cancel_btn.setIconSize(QSize(16, 16))
         self.cancel_btn.clicked.connect(self._cancel)
@@ -155,12 +174,18 @@ class PdfPanel(QWidget):
         self.status_label.setProperty("role", "muted")
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
-        self.log_view.setMaximumHeight(160)
+        self.log_view.setMaximumHeight(120)
+        self.log_view.hide()
+        self.log_btn = QPushButton("处理详情")
+        self.log_btn.setProperty("flat", True)
+        self.log_btn.setCheckable(True)
+        self.log_btn.toggled.connect(self.log_view.setVisible)
 
         # Layout
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
         layout.setContentsMargins(14, 14, 14, 14)
+        layout.addWidget(self.provider_combo)
         layout.addWidget(self.drop_label)
         top_row = QHBoxLayout()
         top_row.addWidget(pick_btn)
@@ -168,9 +193,19 @@ class PdfPanel(QWidget):
         layout.addLayout(top_row)
         layout.addWidget(fmt_box)
         layout.addWidget(opts_box)
+        job_row = QHBoxLayout()
+        self.job_combo = QComboBox()
+        self.job_combo.setMinimumContentsLength(20)
+        self.job_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.resume_btn = QPushButton("继续 / 补下载")
+        self.resume_btn.clicked.connect(self._resume)
+        job_row.addWidget(self.job_combo, 1)
+        job_row.addWidget(self.resume_btn)
+        layout.addLayout(job_row)
         layout.addLayout(action_row)
         layout.addWidget(self.progress)
         layout.addWidget(self.status_label)
+        layout.addWidget(self.log_btn, 0, Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(self.log_view)
 
     # ---- file selection ----------------------------------------------------
@@ -218,6 +253,8 @@ class PdfPanel(QWidget):
     def _set_pdf(self, p: Path) -> None:
         """User picked/dropped a new file: parse it once and reset the
         output dir to its folder. Refreshes reuse _update_file_labels."""
+        if self._worker is not None:
+            return
         self._pdf_path = p
         self._page_count = _count_pdf_pages(p)
         self.out_edit.setText(str(p.parent))
@@ -238,6 +275,22 @@ class PdfPanel(QWidget):
         else:
             self.file_info.setText(f"{p.name}  (页数未知)")
             self.cost_label.setText("预估成本: 未知")
+        if self.provider_combo.currentData() == "llm":
+            self.cost_label.setText("按实际 Token 统计")
+
+    def _provider_changed(self) -> None:
+        llm = self.provider_combo.currentData() == "llm"
+        self.format_box.setVisible(not llm)
+        self.cb_rm_spaces.setVisible(not llm)
+        if llm:
+            self.cost_label.setText("按实际 Token 统计")
+        elif not self._pdf_path:
+            self.cost_label.setText("预估成本: —")
+        self._update_file_labels()
+
+    def _choose_provider(self):
+        config.save_settings({"pdf_provider": self.provider_combo.currentData()})
+        self._provider_changed()
 
     def _toggle_range(self, idx: int) -> None:
         self.range_edit.setEnabled(idx == 1)
@@ -257,8 +310,11 @@ class PdfPanel(QWidget):
     def _start(self) -> None:
         if self._worker is not None:
             return
-        if not self._pdf_path or not self._pdf_path.exists():
+        if not self._pdf_path or not self._pdf_path.is_file():
             QMessageBox.warning(self, "缺少文件", "请先选择 PDF 文件。")
+            return
+        if self.provider_combo.currentData() == "llm":
+            self._start_llm()
             return
         formats = self._selected_formats()
         if not formats:
@@ -269,6 +325,13 @@ class PdfPanel(QWidget):
             QMessageBox.warning(self, "缺少 API Key",
                                 "请先在设置中填入 Mathpix API Key。")
             return
+
+        page_ranges = None
+        if self.range_combo.currentIndex() == 1:
+            page_ranges = self.range_edit.text().strip()
+            if not page_ranges:
+                QMessageBox.warning(self, "页面范围为空", "请填写要转换的页码，或选择全部页面。")
+                return
 
         # Confirm cost for big files (threshold = 100 pages)
         if self._page_count and self._page_count > 100:
@@ -286,10 +349,6 @@ class PdfPanel(QWidget):
                 "将按 API 实际处理页数计费。继续？")
             if ret != QMessageBox.StandardButton.Yes:
                 return
-
-        page_ranges = None
-        if self.range_combo.currentIndex() == 1:
-            page_ranges = self.range_edit.text().strip() or None
 
         opts = PdfOptions(
             formats=formats,
@@ -315,9 +374,61 @@ class PdfPanel(QWidget):
         # fallback when no page range was requested.
         self._billing_page_count = self._page_count if not page_ranges else None
 
+        try:
+            job = self._jobs.create(self._pdf_path, asdict(opts), out_dir,
+                                    creds["app_id"], self._billing_page_count)
+        except Exception as exc:
+            self.start_btn.setEnabled(True)
+            self.cancel_btn.setEnabled(False)
+            QMessageBox.warning(self, "任务保存失败", str(exc))
+            return
         self._worker = PdfWorker(
             self._pdf_path, opts, out_dir,
-            creds["app_id"], creds["app_key"], parent=self)
+            creds["app_id"], creds["app_key"], parent=self,
+            job_store=self._jobs, job=job)
+        self._launch_worker()
+
+    def _start_llm(self) -> None:
+        settings = config.get_llm()
+        if not settings["api_key"]:
+            QMessageBox.warning(self, "缺少 API Key", "请先在设置中填写大模型 API Key。")
+            return
+        page_ranges = self.range_edit.text().strip() if self.range_combo.currentIndex() == 1 else None
+        if page_ranges == "":
+            QMessageBox.warning(self, "页面范围为空", "请填写要转换的页码，或选择全部页面。")
+            return
+        try:
+            from llm_pdf import selected_pages
+            from llm_client import validate_endpoint
+            validate_endpoint(settings["base_url"])
+            if self._page_count:
+                selected = selected_pages(page_ranges, self._page_count)
+                if len(selected) > 100 and QMessageBox.question(self, "确认转换",
+                    f"将逐页识别 {len(selected)} 页，按实际 Token 计费。继续？") != QMessageBox.StandardButton.Yes:
+                    return
+            out = Path(self.out_edit.text().strip() or ".")
+            out.mkdir(parents=True, exist_ok=True)
+            job = self._jobs.create_llm(self._pdf_path, {"page_ranges": page_ranges}, out, settings)
+            self._worker = LlmPdfWorker(self._jobs, job, settings, parent=self)
+        except Exception as exc:
+            QMessageBox.warning(self, "无法创建任务", str(exc))
+            return
+        self.log_view.clear()
+        self.progress.setValue(0)
+        self.status_label.setText("准备逐页识别…")
+        self._launch_worker()
+
+    def _launch_worker(self) -> None:
+        self._refresh_jobs(self._worker.job_id)
+        self.start_btn.setEnabled(False)
+        self.resume_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(True)
+        for widget in (self.provider_combo, self.pick_btn, self.range_combo, self.range_edit,
+                       self.out_edit, self.out_browse, self.format_box, self.cb_rm_spaces, self.job_combo):
+            widget.setEnabled(False)
+        llm = isinstance(self._worker, LlmPdfWorker)
+        self.cancel_btn.setText("暂停识别" if llm else "停止等待")
+        self.cancel_btn.setToolTip("已完成页面会保留" if llm else "仅停止本地等待，远端任务可能继续处理")
         self._worker.progress.connect(self._on_progress)
         self._worker.log.connect(self._on_log)
         self._worker.billed.connect(self._on_billed)
@@ -326,10 +437,60 @@ class PdfPanel(QWidget):
         self._worker.finished.connect(self._cleanup_worker)
         self._worker.start()
 
+    def _refresh_jobs(self, selected=None) -> None:
+        selected = selected or self.job_combo.currentData()
+        self.job_combo.clear()
+        for job in self._jobs.recent():
+            self.job_combo.addItem(
+                f"{Path(job['source']).name} · {job.get('model', 'Mathpix')} · {job['status']}", job["id"])
+            self.job_combo.setItemData(self.job_combo.count() - 1,
+                str(job["source"]) + "\n" + job["out_dir"] + "\n" + job.get("error", ""),
+                Qt.ItemDataRole.ToolTipRole)
+        if selected:
+            idx = self.job_combo.findData(selected)
+            if idx >= 0:
+                self.job_combo.setCurrentIndex(idx)
+        if not self.job_combo.count():
+            self.job_combo.addItem("暂无 PDF 任务", None)
+        self.resume_btn.setEnabled(self._worker is None and bool(self.job_combo.currentData()))
+
+    def _resume(self) -> None:
+        if self._worker is not None or not self.job_combo.currentData():
+            return
+        try:
+            job = self._jobs.get(self.job_combo.currentData())
+            if job.get("provider") == "llm":
+                settings = config.get_llm()
+                if not settings["api_key"] or settings["base_url"] != job["base_url"]:
+                    raise ValueError("请先在设置中配置此任务原 API 地址及其有效密钥。")
+                self._worker = LlmPdfWorker(self._jobs, job, settings, parent=self)
+                self.log_view.clear()
+                self.progress.setValue(0)
+                self.status_label.setText("恢复逐页识别…")
+                self._launch_worker()
+                return
+            if not job.get("pdf_id"):
+                raise ValueError("未取得远端任务 ID，无法恢复。请先检查 Mathpix 端是否已接收任务，再决定是否重新转换。")
+            creds = self._get_creds()
+            if not creds or creds["app_id"] != job["app_id"]:
+                raise ValueError("请在设置中使用提交此任务时的 Mathpix app_id 和有效密钥。")
+            self._billing_page_count = job.get("page_count")
+            self._worker = PdfWorker(Path(job["source"]), PdfOptions(**job["options"]),
+                Path(job["out_dir"]), creds["app_id"], creds["app_key"], parent=self,
+                job_store=self._jobs, job=job)
+        except Exception as exc:
+            QMessageBox.warning(self, "无法恢复任务", str(exc))
+            return
+        self.log_view.clear()
+        self.progress.setValue(0)
+        self.status_label.setText("恢复任务…")
+        self._launch_worker()
+
     def _cancel(self) -> None:
         if self._worker:
             self._worker.cancel()
-            self.status_label.setText("正在取消…")
+            self.cancel_btn.setEnabled(False)
+            self.status_label.setText("正在停止，等待当前请求返回…")
 
     # ---- worker callbacks --------------------------------------------------
 
@@ -345,21 +506,25 @@ class PdfPanel(QWidget):
         # (Mathpix still bills them). Prefer the page count reported by the
         # API (honors page_ranges, works without pypdf); fall back to the
         # local count snapshot.
-        pages = num_pages or self._billing_page_count or 0
+        job_id = self._worker.job_id if self._worker else None
+        pages = num_pages if job_id else (num_pages or self._billing_page_count or 0)
         if not pages:
             return
         try:
-            config.bump_pdf_pages(pages)
+            if job_id:
+                config.record_pdf_pages(job_id, pages)
+            else:
+                config.bump_pdf_pages(pages)
         except Exception as exc:
             sys.stderr.write(f"counter bump failed: {exc}\n")
         if self._on_pages_processed:
             try:
-                self._on_pages_processed(pages)
+                self._on_pages_processed(pages, job_id)
             except Exception:
                 pass
 
     def _on_done(self, paths: list) -> None:
-        out = Path(self.out_edit.text().strip() or ".")
+        out = Path(paths[0]).parent if paths else None
         self.status_label.setText(f"完成，共 {len(paths)} 个文件")
         self.progress.setValue(100)
         QMessageBox.information(
@@ -367,7 +532,8 @@ class PdfPanel(QWidget):
             "转换完成：\n" + "\n".join(str(p) for p in paths))
         # Best-effort: open the output folder
         try:
-            os.startfile(out)  # type: ignore[attr-defined]
+            if out is not None:
+                os.startfile(out)  # type: ignore[attr-defined]
         except Exception:
             pass
 
@@ -379,4 +545,13 @@ class PdfPanel(QWidget):
     def _cleanup_worker(self) -> None:
         self.start_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
+        worker = self._worker
         self._worker = None
+        if worker is not None:
+            worker.deleteLater()
+        for widget in (self.provider_combo, self.pick_btn, self.range_combo,
+                       self.out_edit, self.out_browse, self.format_box, self.cb_rm_spaces, self.job_combo):
+            widget.setEnabled(True)
+        self._toggle_range(self.range_combo.currentIndex())
+        self._refresh_jobs()
+        self.activity_finished.emit()

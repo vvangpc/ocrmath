@@ -6,7 +6,7 @@ from PyQt6.QtGui import QKeySequence
 from PyQt6.QtWidgets import (
     QDialog, QFormLayout, QGridLayout, QLabel, QLineEdit, QPushButton,
     QVBoxLayout, QHBoxLayout, QMessageBox, QGroupBox, QKeySequenceEdit,
-    QSpinBox, QDoubleSpinBox, QInputDialog, QScrollArea, QWidget,
+    QSpinBox, QDoubleSpinBox, QInputDialog, QScrollArea, QWidget, QComboBox, QTabWidget,
 )
 
 import config
@@ -27,7 +27,7 @@ class SettingsDialog(QDialog):
 
     def __init__(self, parent=None, on_purge_now=None):
         super().__init__(parent)
-        self.setWindowTitle("ocrmath 设置")
+        self.setWindowTitle("OCRmath · 设置")
         self.setMinimumWidth(540)
         self.resize(560, 720)
 
@@ -44,7 +44,18 @@ class SettingsDialog(QDialog):
         self._on_purge_now = on_purge_now
 
         # ---- API group ----
-        api_box = QGroupBox("API 凭证")
+        provider_box = QGroupBox("识别服务")
+        provider_form = QFormLayout(provider_box)
+        self.image_provider = QComboBox()
+        self.pdf_provider = QComboBox()
+        for kind, combo in (("image", self.image_provider), ("pdf", self.pdf_provider)):
+            combo.addItem("Mathpix", "mathpix")
+            combo.addItem("大模型 · Responses API", "llm")
+            combo.setCurrentIndex(combo.findData(config.get_provider(kind)))
+        provider_form.addRow("截图识别", self.image_provider)
+        provider_form.addRow("PDF 转换", self.pdf_provider)
+
+        api_box = QGroupBox("Mathpix")
         self.id_edit = QLineEdit(all_settings.get("app_id", ""))
         self.key_edit = QLineEdit(all_settings.get("app_key", ""))
         self.key_edit.setEchoMode(QLineEdit.EchoMode.Password)
@@ -64,6 +75,25 @@ class SettingsDialog(QDialog):
         api_form.setSpacing(8)
         api_form.addRow("App ID", self.id_edit)
         api_form.addRow("App Key", key_row)
+
+        llm_box = QGroupBox("大模型 · Responses API")
+        llm = config.get_llm()
+        self.llm_key_edit = QLineEdit(llm["api_key"])
+        self.llm_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.llm_model_edit = QLineEdit(llm["model"])
+        self.llm_model_edit.setPlaceholderText("输入模型 ID，例如 gpt-6-luna")
+        self.llm_url_edit = QLineEdit(llm["base_url"])
+        show_llm = QPushButton("显示")
+        show_llm.setCheckable(True)
+        show_llm.setFixedWidth(64)
+        show_llm.toggled.connect(lambda on: self._toggle_echo(self.llm_key_edit, show_llm, on))
+        llm_key_row = QHBoxLayout()
+        llm_key_row.addWidget(self.llm_key_edit)
+        llm_key_row.addWidget(show_llm)
+        llm_form = QFormLayout(llm_box)
+        llm_form.addRow("API Key", llm_key_row)
+        llm_form.addRow("模型", self.llm_model_edit)
+        llm_form.addRow("API Base URL", self.llm_url_edit)
 
         # ---- Hotkey group ----
         hk_box = QGroupBox("全局快捷键")
@@ -88,7 +118,7 @@ class SettingsDialog(QDialog):
         hk_layout.addLayout(hk_row)
 
         # ---- Pricing group ----
-        price_box = QGroupBox("终端定价设置")
+        price_box = QGroupBox("Mathpix 单价与汇率")
         self._pending_image_price = float(all_settings.get(
             "image_price_usd", config.DEFAULT_IMAGE_PRICE))
         self._pending_pdf_price = float(all_settings.get(
@@ -150,7 +180,7 @@ class SettingsDialog(QDialog):
         # ---- WebDAV group ----
         wd_box = QGroupBox("WebDAV 同步")
         wd_warn = QLabel(
-            "⚠ API Key 以明文 JSON 存放到你的 WebDAV 服务器,请使用 HTTPS。"
+            "⚠ Mathpix 凭证以明文 JSON 存放到你的 WebDAV 服务器，请使用 HTTPS。大模型密钥仅保存在本机。"
         )
         wd_warn.setProperty("role", "warning")
         wd_warn.setWordWrap(True)
@@ -267,27 +297,30 @@ class SettingsDialog(QDialog):
         btn_row.addWidget(cancel_btn)
         btn_row.addWidget(save_btn)
 
-        # ---- Scrollable content ----
-        content = QWidget()
-        content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(10)
-        content_layout.addWidget(api_box)
-        content_layout.addWidget(hk_box)
-        content_layout.addWidget(price_box)
-        content_layout.addWidget(wd_box)
-        content_layout.addWidget(cache_box)
-        content_layout.addStretch(1)
-
-        scroll = QScrollArea()
-        scroll.setWidget(content)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        tabs = QTabWidget()
+        for title, groups in (
+            ("识别服务", (provider_box, api_box, llm_box)),
+            ("偏好", (hk_box, price_box, cache_box)),
+            ("同步", (wd_box,)),
+        ):
+            content = QWidget()
+            content_layout = QVBoxLayout(content)
+            content_layout.setContentsMargins(4, 12, 4, 4)
+            content_layout.setSpacing(14)
+            for group in groups:
+                content_layout.addWidget(group)
+            content_layout.addStretch()
+            scroll = QScrollArea()
+            scroll.setWidget(content)
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+            tabs.addTab(scroll, title)
+        self.tabs = tabs
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 16, 18, 16)
         layout.setSpacing(10)
-        layout.addWidget(scroll, 1)
+        layout.addWidget(tabs, 1)
         layout.addLayout(btn_row)
 
     # ---- worker wiring -----------------------------------------------------
@@ -452,8 +485,18 @@ class SettingsDialog(QDialog):
     def _save(self) -> None:
         app_id = self.id_edit.text().strip()
         app_key = self.key_edit.text().strip()
-        if not app_id or not app_key:
+        providers = (self.image_provider.currentData(), self.pdf_provider.currentData())
+        if "mathpix" in providers and (not app_id or not app_key):
             QMessageBox.warning(self, "缺少字段", "App ID 和 App Key 都不能为空。")
+            return
+        if "llm" in providers and (not self.llm_key_edit.text().strip() or not self.llm_model_edit.text().strip()):
+            QMessageBox.warning(self, "缺少字段", "请填写大模型 API Key 和模型名称。")
+            return
+        from llm_client import validate_endpoint
+        try:
+            llm_url = validate_endpoint(self.llm_url_edit.text())
+        except ValueError as exc:
+            QMessageBox.warning(self, "API 地址无效", str(exc))
             return
 
         qt_seq = self.hotkey_edit.keySequence().toString(
@@ -485,6 +528,10 @@ class SettingsDialog(QDialog):
 
         try:
             config.save_settings({
+                "image_provider": providers[0], "pdf_provider": providers[1],
+                "llm_api_key": self.llm_key_edit.text().strip(),
+                "llm_model": self.llm_model_edit.text().strip() or config.DEFAULT_LLM_MODEL,
+                "llm_base_url": llm_url,
                 "app_id": app_id,
                 "app_key": app_key,
                 "image_price_usd": float(self._pending_image_price),
@@ -513,6 +560,7 @@ class SettingsDialog(QDialog):
         ret = QMessageBox.question(
             self, "确认", "清除已保存的 API 凭证?")
         if ret == QMessageBox.StandardButton.Yes:
-            config.save_settings({}, drop=("app_id", "app_key"))
+            config.save_settings({}, drop=("app_id", "app_key", "llm_api_key"))
             self.id_edit.clear()
             self.key_edit.clear()
+            self.llm_key_edit.clear()

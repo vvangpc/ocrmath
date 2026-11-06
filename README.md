@@ -2,8 +2,7 @@
 
 # ocrmath
 
-> 自制 Mathpix Snipping Tool 替代品 — 调用 Mathpix API 实现截屏公式识别 + PDF 转 Markdown / DOCX。
-> 用 pay-as-you-go 套餐替代月度订阅：按 100 张截图 / 月约 $0.20，比订阅档（$4.99–$19/月）省 90% 以上。
+> 截屏公式识别与 PDF 转换工具。Mathpix 与大模型两种服务可选：Mathpix 支持多格式转换，大模型支持截图转 LaTeX/Markdown、PDF 逐页转 Markdown。
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue) ![PyQt6](https://img.shields.io/badge/GUI-PyQt6-green) ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey) ![License](https://img.shields.io/badge/license-MIT-orange)
 
@@ -14,17 +13,21 @@
 | | |
 |---|---|
 | **截屏公式识别** | 全局快捷键唤起 → 鼠标拖选公式区域 → 自动识别 → 一键复制 LaTeX |
+| **可切换大模型** | 默认 gpt-6-luna，模型名与 Responses API 地址可配置；保留 Mathpix，截图与 PDF 可分别选择服务 |
 | **LaTeX 实时预览** | 结果窗口内置 MathJax 矢量渲染，所见即所得，支持中英公式与中文混排 |
+| **专注浮窗** | 紧凑结果窗口，原图按需展开；预览 / LaTeX / Markdown 切换，复制后保留窗口，底部直达 PDF、历史、用量与设置 |
 | **本地缓存** | SHA256 去重，相同区域第二次识别零成本零网络 |
 | **历史记录** | 主窗口「历史记录」标签页：搜索 / 复制 / 重新打开 / 删除，缩略图后台加载不卡界面 |
 | **PDF 转换** | 拖拽 PDF → 选输出格式（MMD/MD/DOCX/TeX/HTML/带文字层 PDF）→ 异步进度条 |
-| **使用统计** | 主窗口展示本月 / 今日的识别次数、PDF 页数与累计花费 |
+| **PDF 任务恢复** | 保存远端任务 ID，重启后继续处理；重试只补下载缺失或已修改的结果，按任务去重统计页数 |
+| **Mathpix 使用统计** | 主窗口展示本月 / 今日的识别次数、PDF 页数与累计花费 |
+| **Token 用量** | 大模型请求按模型、今日/本月/全部统计输入、缓存输入和输出 token；与 Mathpix 按张/页计费分开 |
 | **WebDAV 同步** | 可选：把计数器与凭证同步到自建 WebDAV（Nextcloud 等），多机共享额度视图 |
 | **托盘常驻** | 关闭主窗口最小化到托盘；识别中托盘图标闪烁状态指示 |
 | **可自定义快捷键** | 设置对话框中按下任意组合键即可记录 |
 | **加密凭证存储** | Windows DPAPI 与当前用户绑定，明文不落盘 |
 
-## 成本（来源：[Mathpix Pricing](https://mathpix.com/pricing/api)）
+## Mathpix 成本（来源：[Mathpix Pricing](https://mathpix.com/pricing/api)）
 
 | 操作 | 单价 | 100 次/月 |
 |---|---|---|
@@ -61,17 +64,43 @@ python main.py
 
 ## 使用
 
+### 配置大模型
+
+在「设置」中分别选择截图识别和 PDF 转换的服务。使用大模型时填写：
+
+- **API Key**：在 OpenAI API 平台或兼容服务上创建的密钥。
+- **模型**：默认 `gpt-6-luna`，可直接填写其他模型 ID，无需修改代码。
+- **API Base URL**：默认 `https://api.openai.com/v1`。兼容服务必须支持 Responses API；截图需要图像输入能力，PDF 需要 `input_file` PDF 视觉输入能力。只有 Chat Completions 接口的服务目前不支持。
+
+密钥在 Windows 下与其他设置一起用 DPAPI 加密，仅保存本机，不加入 WebDAV 同步。选择大模型后无需填写 Mathpix 凭证；如仍选择某一路使用 Mathpix，则需保留对应凭证。浮窗和 PDF 页面也可分别切换服务，已有结果继续显示原识别服务的信息。
+
+大模型接口按 [OpenAI 图像输入](https://developers.openai.com/api/docs/guides/images-vision)与 [PDF 输入](https://developers.openai.com/api/docs/guides/file-inputs)接入。模型的识别准确率和实际账户权限需用自己的材料与密钥验证。
+
+### 大模型 PDF 逐页转 Markdown
+
+选择「大模型 · Markdown」后，每次请求仅发送一页 PDF，保留页内公式的 LaTeX 表达。可填写 `2,4-6` 这样的页面范围，重复页码去重，按原文顺序输出。程序在后台保存源文件副本、每页文字及任务配置，完成后合并成 `.md`；不包含 Word、原版式还原或带文字层 PDF，其他格式仍可选择 Mathpix。
+
+中途失败或取消后，点击「继续 / 补下载」只处理尚未保存的页面。每个任务固定原 API 地址、模型和识别提示版本，更改默认模型不会改变已有任务；恢复时需要原 API 地址的有效密钥。完整结果文件丢失时可从已保存的页面文字重新导出，无需再调用 API。原文件删除后，只要本机任务副本仍在即可继续识别。
+
+截图缓存与 PDF 页面缓存按 API 地址、模型和提示版本隔离。相同页面可跨任务命中缓存；本地缓存命中不会新增 API token。API 连接超时不会自动重发，以避免不确定的重复消耗；手动重试可能再次计费。未完成或拒绝的模型响应不会当作识别结果，但返回的 token 用量仍会记录。
+
+「Token 用量」页展示本机实际收到的 API usage；缓存输入是输入 token 的子集，不能重复相加。不返回 usage 的兼容服务会标注未知次数；连接中断而未收到响应的消耗需以服务端账单为准。该统计不与 WebDAV 同步，也不估算赠送额度余额或套用 Mathpix 单价。
+
 ### 截屏识别
 
-1. 按全局快捷键（默认 `Ctrl+Alt+M`）或点击托盘图标
+1. 打开 OCRmath 后，在浮窗中选择识别服务。点击「截图识别」、按全局快捷键（默认 `Ctrl+Alt+M`）或点击托盘图标
 2. 屏幕变暗后用鼠标拖选公式区域，松开
 3. 等待 1–2 秒，结果窗口弹出
-4. 点击行内 / 独立 LaTeX 旁的「复制」按钮即可粘贴
-5. 复制后窗口自动关闭
+4. 纯公式默认复制 LaTeX，混合文本默认复制 Markdown；也可切换到对应标签查看源码。LaTeX 标签中可选择纯源码、行内 `$…$` 或独立 `$$…$$`
+5. 点击「查看原图」对照截图；复制后浮窗保留，可继续切换格式。`Ctrl+Shift+C` 复制当前格式，`Esc` 隐藏浮窗
+
+截图识别失败时，浮窗保留原图和错误信息，点击「重试原图」即可重试。识别期间锁定服务与截图操作；截图前临时隐藏应用窗口，取消选区后返回浮窗。
+
+浮窗底部的「PDF 任务」「历史」「用量」打开工具窗口，关闭工具窗口或点击「返回浮窗」会回到原识别结果。「设置」按识别服务、偏好和同步分组。关闭浮窗后仍在托盘常驻。
 
 ### PDF 转换
 
-1. 主窗口切到「PDF 转换」标签
+1. 在浮窗底部点击「PDF 任务」
 2. 拖入 PDF 或点「选择 PDF…」
 3. 勾选所需输出格式：
    - **MMD** — Mathpix Markdown，公式用 `$...$` 保留 LaTeX，适合 Typora / Obsidian
@@ -82,6 +111,24 @@ python main.py
    - **带文字层 PDF** — 原 PDF 但可选中复制文字
 4. 输出目录默认与所选 PDF 同目录
 5. 点「开始转换」，进度条流畅推进，完成后自动打开输出文件夹
+
+带文字层 PDF 保存为 `原文件名_ocr.pdf`，保留源文件；输出重名时自动添加编号。下载完整后才保存为正式文件，失败或取消时清理本次下载的临时文件。取消会在下一次收到下载数据时生效，网络阻塞时仍需等待请求返回或超时；已提交的服务端转换不会因此撤销。
+
+### 恢复 PDF 任务与补下载
+
+在 PDF 标签页的任务下拉框中选择任务，点击「继续 / 补下载」。程序沿用已保存的远端任务 ID，不重新上传 PDF；原始文件已移动或删除也可恢复。重试保留原输出目录和格式，校验已保存文件的 SHA-256，仅下载缺失或内容已变化的结果。用户修改的文件会保留，新下载结果自动编号。
+
+任务记录保存在本机 `pdf_jobs.db`，包含任务 ID、输出路径、选项和进度，不保存 API 密钥。恢复时需使用原 app_id 的有效凭证。页数按任务累计去重，恢复后发现新增页数才补记；本地统计仍是估算，并非服务端账单对账。
+
+如果上传时断网、未收到任务 ID，程序不会自动重新提交，需先检查 Mathpix 端是否已接收。远端任务或输出过期后无法恢复，也不会自动产生新的上传。当前任务选择框显示最近 100 条记录。
+
+### WebDAV 多机计数
+
+新版使用共享历史基数加各设备的独立增量：同一设备取最大值，不同设备相加，反复同步不重复计数。旧总数按最大值迁入历史基数；旧版此前遗漏的独立增量无法还原。
+
+配置的路径仍可保持 `/ocrmath/sync.json`，新版实际使用同目录的 `sync.v2.json`。仅首次创建新版文件时读取旧文件作为迁移来源，保留旧文件不覆盖。**请升级所有参与同步的设备**；继续运行旧版的设备不会与新版持续交换数据。每台设备在本机生成独立标识，请通过 WebDAV 同步，不要复制本地配置来克隆设备。
+
+服务器需要提供强 ETag 并支持条件写入。程序使用 `If-Match` / `If-None-Match` 防止并发覆盖，冲突后重新读取、合并并重试，最多 4 次；不支持时明确报错，保留本地数据。
 
 ### 历史记录
 
@@ -98,6 +145,9 @@ python main.py
 %APPDATA%\ocrmath\
 ├── config.dat      # DPAPI 加密的凭证 + 快捷键 + WebDAV 配置
 ├── ocrmath.db      # SQLite：识别结果缓存、历史索引、使用记录
+├── pdf_jobs.db     # PDF 任务 ID、输出记录与恢复状态（不含密钥）
+├── llm_usage.db    # 本机大模型 token 账本与 PDF 页面缓存（不含密钥）
+├── pdf_sources\   # 大模型任务的本地源 PDF 副本，用于恢复
 ├── cache\          # 截屏 PNG 文件（按 SHA256 前两位分桶）
 │   ├── ab\
 │   │   └── ab12...ef.png
@@ -115,11 +165,16 @@ result_window.py   # 截图结果展示窗（含 LaTeX 预览 + 缓存徽章）
 pdf_panel.py       # PDF 转换 UI（拖拽 + 进度 + 日志）
 history_panel.py   # 历史记录面板（后台缩略图加载）
 image_client.py    # /v3/text 调用 + QThread worker
+llm_client.py      # 可配置 Responses API 截图/页面识别
+llm_pdf.py         # PDF 分页、页面缓存、恢复及 Markdown 导出
+llm_store.py       # 大模型 token 账本与页面缓存
 pdf_client.py      # /v3/pdf 提交 / 轮询 / 下载 + QThread worker
+pdf_jobs.py        # 本机 PDF 任务持久化与恢复记录
 api_common.py      # 两个 API client 共用的请求错误格式化
 storage.py         # SQLite 缓存 + 历史 + 使用记录 + PNG 文件管理
 config.py          # DPAPI 加密读写 + 快捷键 / 计价 / WebDAV 配置
 webdav.py          # WebDAV 同步 worker
+counters.py        # 历史基数与每设备增量的幂等合并
 mathjax_view.py    # MathJax 3 + QWebEngineView 矢量渲染（固定版本 + SHA-256 校验）
 settings_dialog.py # API key / 快捷键 / 计价 / WebDAV 设置对话框
 styles.py          # 全局 QSS 主题
@@ -182,10 +237,11 @@ python test_pdf_api.py path\to\small.pdf
 
 ## 隐私说明
 
-- 所有图像和 PDF **直接发送到 Mathpix**（HTTPS），ocrmath 不上传到其他服务器
+- 图像和 PDF 按所选服务发送到 Mathpix 或配置的大模型 API；默认大模型地址为 OpenAI。选择自定义地址前请确认服务归属。
 - API 凭证用 Windows DPAPI 加密，与当前 Windows 用户账户绑定，他人复制走也解不开
 - 可选的 WebDAV 同步只连接你自己配置的服务器
 - 识别结果缓存在本地 `%APPDATA%\ocrmath\ocrmath.db`
+- 大模型 PDF 副本和逐页文字保存在本机以支持恢复；任务副本和任务正文不会随截图历史清空。页面共享缓存按保留天数清理，token 账本保留。
 - Mathpix 会保留你提交的源 PDF 30 天、输出文件 90 天，详见 [Mathpix Privacy](https://mathpix.com/privacy)
 
 ## 贡献

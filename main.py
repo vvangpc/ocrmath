@@ -21,12 +21,13 @@ import config
 import mathjax_view
 import webdav
 from image_client import ImageOcrWorker
+from llm_client import LlmImageWorker, cache_key
 from main_window import MainWindow
 from result_window import ResultWindow
 from settings_dialog import SettingsDialog
 from snipper import Snipper
 from storage import Storage, Recognition
-from styles import STYLESHEET, ACCENT
+from styles import apply_theme, ACCENT
 from ui_icons import app_icon, icon
 
 
@@ -88,7 +89,10 @@ class App(QObject):
         self._current_hotkey: str = ""
         self._pending_sha: str | None = None
         self._pending_png: bytes | None = None
-        self._worker: ImageOcrWorker | None = None
+        self._retry_png: bytes | None = None
+        self._failed_png: bytes | None = None
+        self._snipping = False
+        self._worker: ImageOcrWorker | LlmImageWorker | None = None
         self._sync_worker: webdav.WebDavSyncWorker | None = None
         self._exit_sync_worker: webdav.WebDavSyncWorker | None = None
         self._settings_dlg: SettingsDialog | None = None
@@ -114,7 +118,13 @@ class App(QObject):
 
         # Widgets
         self.snipper = Snipper()
-        self.result_win = ResultWindow(on_recapture=self.on_snip)
+        self.result_win = ResultWindow(
+            on_recapture=self.on_snip, on_retry=self._retry_last_image,
+            on_open_pdf=lambda: self._open_tool("pdf"),
+            on_open_history=lambda: self._open_tool("history"),
+            on_open_usage=lambda: self._open_tool("usage"),
+            on_open_settings=self.open_settings,
+            on_provider_changed=self._on_image_provider_changed)
         self.main_win = MainWindow(
             on_snip=self.on_snip,
             on_open_settings=self.open_settings,
@@ -122,10 +132,13 @@ class App(QObject):
             storage=self.storage,
             on_open_history=self._on_history_open,
             on_sync_now=self._sync_now_manual,
+            on_show_result=self._show_main,
         )
+        self.main_win.pdf_panel.activity_finished.connect(self._refresh_task_count)
+        self._refresh_task_count()
 
         self.snipper.captured.connect(self._on_captured)
-        self.snipper.cancelled.connect(lambda: None)
+        self.snipper.cancelled.connect(self._on_snip_cancelled)
 
         # Tray + busy animation
         self.tray = self._build_tray()
@@ -138,9 +151,10 @@ class App(QObject):
         self.bridge.triggered.connect(self.on_snip,
                                       Qt.ConnectionType.QueuedConnection)
         self._install_hotkey(config.get_hotkey())
+        self.result_win.show_ready()
 
         # First-run prompt
-        if config.load() is None:
+        if not config.has_image_credentials():
             self.open_settings()
 
         # Startup auto-sync (best-effort, after UI is up)
@@ -162,7 +176,8 @@ class App(QObject):
             self._settings_dlg.raise_()
             self._settings_dlg.activateWindow()
             return
-        dlg = SettingsDialog(self.main_win, on_purge_now=self._purge_now)
+        parent = self.main_win if self.main_win.isVisible() else self.result_win
+        dlg = SettingsDialog(parent, on_purge_now=self._purge_now)
         dlg.settings_changed.connect(self._on_settings_changed)
         self._settings_dlg = dlg
         try:
@@ -188,6 +203,7 @@ class App(QObject):
             self._uninstall_hotkey()
             self._install_hotkey(new_hotkey)
         self.main_win.refresh_hotkey_display()
+        self.result_win.refresh_settings()
         self.main_win.refresh_stats()
         self._refresh_tray_text()
         self._reconfigure_periodic_timer()
@@ -203,7 +219,7 @@ class App(QObject):
         self.act_snip.triggered.connect(self.on_snip)
         menu.addAction(self.act_snip)
 
-        act_main = QAction("打开主窗口…", self)
+        act_main = QAction("打开浮窗…", self)
         act_main.setIcon(icon("open"))
         act_main.triggered.connect(self._show_main)
         menu.addAction(act_main)
@@ -239,9 +255,22 @@ class App(QObject):
             self._show_main()
 
     def _show_main(self) -> None:
-        self.main_win.show()
-        self.main_win.raise_()
-        self.main_win.activateWindow()
+        self.main_win.hide()
+        self.result_win.show_ready()
+
+    def _open_tool(self, page: str) -> None:
+        self.result_win.hide()
+        self.main_win.show_page(page)
+
+    def _on_image_provider_changed(self) -> None:
+        self.main_win.refresh_hotkey_display()
+
+    def _refresh_task_count(self) -> None:
+        jobs = self.main_win.pdf_panel._jobs.recent()
+        count = sum(j.get("status") != "已完成"
+                    and bool(j.get("pdf_id") or j.get("provider") == "llm")
+                    for j in jobs)
+        self.result_win.set_task_count(count)
 
     def _on_second_instance(self) -> None:
         while (conn := self._instance_server.nextPendingConnection()) is not None:
@@ -278,6 +307,7 @@ class App(QObject):
         except Exception:
             pass
         self.main_win.request_real_close()
+        self.result_win.close()
         self.qapp.quit()
 
     # ---- busy indicator ----------------------------------------------------
@@ -332,6 +362,8 @@ class App(QObject):
 
     @pyqtSlot()
     def on_snip(self) -> None:
+        if self._snipping:
+            return
         if self._worker is not None:
             # Recognition is single-flight; say so instead of letting the
             # user select a region that would then be silently dropped.
@@ -339,30 +371,47 @@ class App(QObject):
                 "ocrmath", "上一张截图还在识别中，请稍候…",
                 QSystemTrayIcon.MessageIcon.Information, 2500)
             return
-        if not config.load():
+        if not config.has_image_credentials():
             self.open_settings()
-            if not config.load():
+            if not config.has_image_credentials():
                 return
-        self.snipper.start()
+        self._snipping = True
+        self.result_win.hide()
+        self.main_win.hide()
+        # Let the compositor remove our windows before grabbing the desktop.
+        QTimer.singleShot(120, self.snipper.start)
+
+    def _on_snip_cancelled(self) -> None:
+        self._snipping = False
+        self.result_win.show_ready()
 
     def _on_captured(self, png: bytes) -> None:
+        self._snipping = False
         # Single-flight: _pending_sha/_pending_png are shared state, so a
         # second capture while one is recognizing must be ignored.
         if self._worker is not None:
             return
-        sha = hashlib.sha256(png).hexdigest()
+        self._failed_png = None
+        self.result_win.set_source(png)
+        self.result_win.refresh_settings()
+        provider = config.get_provider()
+        llm_settings = config.get_llm()
+        sha = (cache_key(png, llm_settings, "image") if provider == "llm"
+               else hashlib.sha256(png).hexdigest())
         cached = self.storage.lookup(sha)
         if cached is not None:
             self.result_win.show_result(cached.result, from_cache=True)
             return
         creds = config.load()
-        if not creds:
+        if (provider == "mathpix" and not creds) or (provider == "llm" and not llm_settings["api_key"]):
             self.open_settings()
             return
         self._pending_sha = sha
         self._pending_png = png
+        self.result_win.show_loading()
         self._start_busy()
-        self._worker = ImageOcrWorker(png, creds["app_id"], creds["app_key"])
+        self._worker = (LlmImageWorker(png, llm_settings) if provider == "llm"
+                        else ImageOcrWorker(png, creds["app_id"], creds["app_key"]))
         self._worker.finished_ok.connect(self._on_ocr_ok)
         self._worker.failed.connect(self._on_ocr_failed)
         # Drop our reference only after the thread has fully wound down —
@@ -371,7 +420,14 @@ class App(QObject):
         self._worker.start()
 
     def _clear_image_worker(self) -> None:
+        worker = self._worker
         self._worker = None
+        if isinstance(worker, QThread):
+            worker.deleteLater()
+        self.result_win.set_busy(False)
+        if self._retry_png is not None:
+            png, self._retry_png = self._retry_png, None
+            QTimer.singleShot(0, lambda: self._on_captured(png))
 
     def _on_ocr_ok(self, result: dict) -> None:
         self._stop_busy()
@@ -387,11 +443,13 @@ class App(QObject):
         self._pending_png = None
         # Bill the API call: cache hits exit before we get here.
         try:
-            config.bump_image_count(1)
+            if result.get("_provider") != "llm":
+                config.bump_image_count(1)
         except Exception as exc:
             sys.stderr.write(f"counter bump failed: {exc}\n")
         try:
-            self.storage.log_usage("image", 1, config.get_image_price())
+            if result.get("_provider") != "llm":
+                self.storage.log_usage("image", 1, config.get_image_price())
         except Exception as exc:
             sys.stderr.write(f"usage log failed: {exc}\n")
         try:
@@ -406,11 +464,24 @@ class App(QObject):
 
     def _on_ocr_failed(self, msg: str) -> None:
         self._stop_busy()
-        QMessageBox.critical(None, "识别失败", msg)
+        self.main_win.refresh_stats()
+        self._failed_png = self._pending_png
         self._pending_sha = None
         self._pending_png = None
+        self.result_win.show_error(msg)
+
+    def _retry_last_image(self) -> None:
+        png = self._failed_png
+        if png is None:
+            return
+        if self._worker is None:
+            QTimer.singleShot(0, lambda: self._on_captured(png))
+        else:
+            self._retry_png = png
 
     def _on_history_open(self, rec: Recognition) -> None:
+        self.main_win.hide()
+        self.result_win.set_source(self.storage.png_bytes(rec.image_sha256))
         self.result_win.show_result(rec.result, from_cache=True)
 
     # ---- usage backfill ----------------------------------------------------
@@ -563,7 +634,7 @@ def main() -> int:
     qapp = QApplication(sys.argv)
     qapp.setApplicationName("ocrmath")
     qapp.setStyle("Fusion")
-    qapp.setStyleSheet(STYLESHEET)
+    apply_theme(qapp)
 
     if not QSystemTrayIcon.isSystemTrayAvailable():
         QMessageBox.critical(None, "系统托盘不可用",

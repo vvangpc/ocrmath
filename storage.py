@@ -41,6 +41,11 @@ CREATE TABLE IF NOT EXISTS usage (
     source      TEXT    NOT NULL DEFAULT 'live'  -- 'live' or 'backfill'
 );
 CREATE INDEX IF NOT EXISTS idx_usage_created ON usage(created_at);
+CREATE TABLE IF NOT EXISTS pdf_usage (
+    job_id TEXT PRIMARY KEY,
+    pages INTEGER NOT NULL,
+    unit_price REAL NOT NULL
+);
 """
 
 
@@ -250,6 +255,21 @@ class Storage:
             )
             self._conn.commit()
 
+    def log_pdf_usage(self, job_id: str, pages: int, unit_price_usd: float) -> None:
+        """A resumed job adds only new pages, in the same DB transaction."""
+        with self._lock, self._conn:
+            row = self._conn.execute("SELECT pages, unit_price FROM pdf_usage WHERE job_id=?",
+                                     (job_id,)).fetchone()
+            previous = row["pages"] if row else 0
+            price = row["unit_price"] if row else unit_price_usd
+            delta = max(0, pages - previous)
+            if not delta:
+                return
+            self._conn.execute("INSERT INTO usage (created_at, kind, count, cost_usd, source) "
+                               "VALUES (?, 'pdf', ?, ?, 'live')", (time.time(), delta, delta * price))
+            self._conn.execute("INSERT INTO pdf_usage VALUES (?, ?, ?) ON CONFLICT(job_id) "
+                               "DO UPDATE SET pages=excluded.pages", (job_id, pages, price))
+
     def usage_summary(self, since_ts: float) -> dict[str, Any]:
         """Aggregate usage events on/after `since_ts`. Returns:
         {'image_count': N, 'pdf_pages': M, 'total_cost': X}"""
@@ -291,12 +311,20 @@ class Storage:
                 ).fetchone()
             if row["m"] is None:
                 cur = self._conn.execute(
-                    "SELECT created_at FROM recognitions ORDER BY created_at")
+                    "SELECT created_at, raw_json FROM recognitions ORDER BY created_at")
             else:
                 cur = self._conn.execute(
-                    "SELECT created_at FROM recognitions "
+                    "SELECT created_at, raw_json FROM recognitions "
                     "WHERE created_at < ? ORDER BY created_at", (row["m"],))
-            timestamps = [r["created_at"] for r in cur.fetchall()]
+            timestamps = []
+            for r in cur.fetchall():
+                try:
+                    result = json.loads(r["raw_json"] or "{}")
+                except (ValueError, TypeError):
+                    result = {}
+                if isinstance(result, dict) and result.get("_provider") == "llm":
+                    continue
+                timestamps.append(r["created_at"])
             if not timestamps:
                 return 0
             cost = float(unit_price_usd)

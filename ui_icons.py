@@ -6,7 +6,7 @@ import math
 from PyQt6.QtCore import QPointF, QRectF, Qt
 from PyQt6.QtGui import (
     QBrush, QColor, QIcon, QImage, QLinearGradient, QPainter, QPainterPath,
-    QPen, QPixmap, QRadialGradient,
+    QPen, QPixmap, QRadialGradient, QGuiApplication, QPalette,
 )
 
 INK = "#263238"
@@ -160,8 +160,11 @@ def app_icon(*, busy: bool = False) -> QIcon:
     return result
 
 
-def icon(name: str, color: str = INK, size: int = 24) -> QIcon:
+def icon(name: str, color: str | None = None, size: int = 24) -> QIcon:
     """Return a named line icon."""
+    if color is None:
+        app = QGuiApplication.instance()
+        color = app.palette().color(QPalette.ColorRole.Text).name() if app else INK
     key = (name, color, size)
     cached = _ICON_CACHE.get(key)
     if cached is not None:

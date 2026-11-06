@@ -1,4 +1,4 @@
-"""Main window — tabbed UI hosting the snipping launcher, PDF panel, history."""
+"""Tool window opened from the compact screenshot surface."""
 from __future__ import annotations
 
 from datetime import datetime
@@ -8,7 +8,7 @@ from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import (
     QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QFrame, QScrollArea,
+    QPushButton, QFrame, QScrollArea, QComboBox, QTableWidget, QTableWidgetItem, QHeaderView,
 )
 
 import config
@@ -18,6 +18,7 @@ from storage import Recognition, Storage
 from styles import ACCENT, MUTED
 from ui_icons import icon
 from ui_utils import format_cost, format_synced, format_unit_price
+from llm_store import LlmStore
 
 
 def _start_of_today() -> float:
@@ -38,19 +39,24 @@ class MainWindow(QMainWindow):
                  get_creds: Callable[[], dict | None],
                  storage: Storage,
                  on_open_history: Callable[[Recognition], None],
-                 on_sync_now: Callable[[], None] | None = None):
+                 on_sync_now: Callable[[], None] | None = None,
+                 on_show_result: Callable[[], None] | None = None):
         super().__init__()
-        self.setWindowTitle("ocrmath - Mathpix OCR 工具")
-        self.resize(480, 560)
+        self.setWindowTitle("OCRmath · 文档与用量")
+        self.resize(760, 700)
+        self.setMinimumSize(600, 500)
         self._on_snip = on_snip
         self._on_open_settings = on_open_settings
         self._on_sync_now = on_sync_now
+        self._on_show_result = on_show_result
         self._storage = storage
+        self._llm_store = LlmStore()
         self._allow_close = False  # close button minimizes to tray instead
 
-        self.snip_tab = self._build_snip_tab()
+        self.snip_tab = self._build_usage_page()
         self.pdf_panel = PdfPanel(get_creds,
                                   on_pages_processed=self._on_pages_processed)
+        self.pdf_panel.activity_finished.connect(self.refresh_stats)
         self.history_panel = HistoryPanel(storage, on_open=on_open_history)
 
         # Scroll wrapper keeps the taller PDF panel from dictating the
@@ -62,71 +68,51 @@ class MainWindow(QMainWindow):
 
         tabs = QTabWidget()
         tabs.setIconSize(QSize(18, 18))
-        tabs.addTab(self.snip_tab, icon("snip", ACCENT), "  截屏识别  ")
-        tabs.addTab(pdf_scroll, icon("pdf", ACCENT), "  PDF 转换  ")
-        tabs.addTab(self.history_panel, icon("history", ACCENT), "  历史记录  ")
+        tabs.addTab(pdf_scroll, "PDF 转换")
+        tabs.addTab(self.history_panel, "识别历史")
+        tabs.addTab(self.snip_tab, "Mathpix 用量")
+        tabs.addTab(self._build_token_tab(), "模型 Token")
         tabs.currentChanged.connect(self._on_tab_changed)
         self._tabs = tabs
 
         wrap = QWidget()
         wlay = QVBoxLayout(wrap)
-        wlay.setContentsMargins(8, 8, 8, 8)
+        wlay.setContentsMargins(18, 16, 18, 16)
+        header = QHBoxLayout()
+        title = QLabel("OCRmath")
+        title.setObjectName("brandName")
+        header.addWidget(title)
+        header.addStretch()
+        back = QPushButton("返回浮窗")
+        back.setProperty("flat", True)
+        back.clicked.connect(self._return_to_result)
+        header.addWidget(back)
+        settings = QPushButton("设置")
+        settings.setProperty("flat", True)
+        settings.clicked.connect(self._on_open_settings)
+        header.addWidget(settings)
+        wlay.addLayout(header)
         wlay.addWidget(tabs)
         self.setCentralWidget(wrap)
 
         self.refresh_hotkey_display()
         self.refresh_stats()
 
-    def _build_snip_tab(self) -> QWidget:
+    def _build_usage_page(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
         layout.setSpacing(10)
         layout.setContentsMargins(14, 14, 14, 14)
 
-        # Hotkey card
-        card = QFrame()
-        card.setProperty("card", "true")
-        card_l = QHBoxLayout(card)
-        card_l.setContentsMargins(16, 12, 16, 12)
-
-        hk_left = QLabel("当前快捷键")
-        hk_left.setProperty("role", "muted")
-        self.hotkey_label = QLabel("Ctrl+Alt+M")
-        self.hotkey_label.setStyleSheet(
-            f"font-family: 'Consolas', monospace; font-size: 13pt;"
-            f"font-weight: 600; color: {ACCENT};"
-        )
-
-        card_l.addWidget(hk_left)
-        card_l.addWidget(self.hotkey_label, 1)
-        layout.addWidget(card)
-
-        snip_btn = QPushButton("立即截屏识别")
-        snip_btn.setObjectName("accent")
-        snip_btn.setIcon(icon("snip", "white"))
-        snip_btn.setIconSize(QSize(22, 22))
-        snip_btn.setMinimumHeight(42)
-        snip_btn.setStyleSheet("font-size: 12pt;")
-        snip_btn.clicked.connect(self._on_snip)
-        layout.addWidget(snip_btn)
-
-        # Stats card
         layout.addWidget(self._build_stats_card())
-
-        layout.addStretch(1)
-
-        bottom = QHBoxLayout()
-        settings_btn = QPushButton("设置")
-        settings_btn.setIcon(icon("settings"))
-        settings_btn.setIconSize(QSize(16, 16))
-        settings_btn.clicked.connect(self._on_open_settings)
-        bottom.addWidget(settings_btn)
-        bottom.addStretch(1)
-
         self.cost_hint = QLabel("")
         self.cost_hint.setProperty("role", "muted")
-        bottom.addWidget(self.cost_hint)
-        layout.addLayout(bottom)
+        layout.addWidget(self.cost_hint)
+        note = QLabel("本月与今日费用来自本机用量记录；多设备累计按当前单价估算。")
+        note.setWordWrap(True)
+        note.setProperty("role", "muted")
+        layout.addWidget(note)
+        layout.addStretch(1)
         return w
 
     def _build_stats_card(self) -> QFrame:
@@ -136,7 +122,7 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(16, 12, 16, 12)
         outer.setSpacing(10)
 
-        head = QLabel("使用统计")
+        head = QLabel("多设备累计")
         head.setProperty("role", "subheading")
         outer.addWidget(head)
 
@@ -147,7 +133,7 @@ class MainWindow(QMainWindow):
         self.stat_cost_value = self._build_stat_value("")
         tiles.addLayout(self._wrap_tile(self.stat_image_value, "截图识别"), 1)
         tiles.addLayout(self._wrap_tile(self.stat_pdf_value, "PDF 转换"), 1)
-        tiles.addLayout(self._wrap_tile(self.stat_cost_value, "累计花费"), 1)
+        tiles.addLayout(self._wrap_tile(self.stat_cost_value, "累计估算"), 1)
         outer.addLayout(tiles)
 
         self.period_summary_label = QLabel("")
@@ -180,11 +166,50 @@ class MainWindow(QMainWindow):
 
         return card
 
+    def _build_token_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        self.token_period = QComboBox()
+        self.token_period.addItems(["本月", "今日", "全部"])
+        self.token_period.currentIndexChanged.connect(self._refresh_tokens)
+        layout.addWidget(self.token_period)
+        self.token_table = QTableWidget(0, 5)
+        self.token_table.setHorizontalHeaderLabels(["模型", "请求", "输入", "缓存输入", "输出"])
+        self.token_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.token_table.horizontalHeader().setMinimumSectionSize(60)
+        self.token_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.token_table.verticalHeader().hide()
+        self.token_table.verticalHeader().setDefaultSectionSize(34)
+        self.token_table.setShowGrid(False)
+        self.token_table.setAlternatingRowColors(True)
+        self.token_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        layout.addWidget(self.token_table)
+        self.token_note = QLabel("本机 API 返回的用量；缓存输入已包含在输入中。")
+        self.token_note.setWordWrap(True)
+        layout.addWidget(self.token_note)
+        refresh = QPushButton("刷新")
+        refresh.clicked.connect(self._refresh_tokens)
+        layout.addWidget(refresh)
+        return page
+
+    def _refresh_tokens(self):
+        since = [_start_of_month(), _start_of_today(), 0][self.token_period.currentIndex()]
+        rows = self._llm_store.summary(since)
+        self.token_table.setRowCount(len(rows))
+        for i, row in enumerate(rows):
+            for j, key in enumerate(("model", "requests", "input_tokens", "cached_tokens", "output_tokens")):
+                item = QTableWidgetItem(str(row[key]))
+                if j:
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.token_table.setItem(i, j, item)
+        unknown = sum(r["unknown"] for r in rows)
+        self.token_note.setText("本机 API 返回的用量；缓存输入已包含在输入中。"
+                               + (f"有 {unknown} 次响应未返回完整用量。" if unknown else ""))
+
     def _build_stat_value(self, text: str) -> QLabel:
         lbl = QLabel(text)
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl.setStyleSheet(
-            f"font-size: 13pt; font-weight: 700; color: {ACCENT};")
+        lbl.setProperty("role", "statValue")
         return lbl
 
     def _wrap_tile(self, value_label: QLabel, caption: str) -> QVBoxLayout:
@@ -193,17 +218,19 @@ class MainWindow(QMainWindow):
         col.addWidget(value_label)
         cap = QLabel(caption)
         cap.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        cap.setStyleSheet(f"color: {MUTED}; font-size: 9pt;")
+        cap.setProperty("role", "muted")
+        cap.setStyleSheet("font-size: 9pt;")
         col.addWidget(cap)
         return col
 
     # ---- public API --------------------------------------------------------
 
     def refresh_hotkey_display(self) -> None:
-        hk = config.get_hotkey()
-        self.hotkey_label.setText(config.keyboard_to_qt(hk))
+        if not self.pdf_panel.is_busy():
+            self.pdf_panel.refresh_price_display()
 
     def refresh_stats(self) -> None:
+        self._refresh_tokens()
         img_n, pdf_n = config.get_counters()
         ip = config.get_image_price()
         pp = config.get_pdf_price()
@@ -263,6 +290,20 @@ class MainWindow(QMainWindow):
         else:
             evt.ignore()
             self.hide()
+            if self._on_show_result:
+                self._on_show_result()
+
+    def show_page(self, name: str) -> None:
+        self._tabs.setCurrentIndex({"pdf": 0, "history": 1, "usage": 2, "tokens": 3}[name])
+        self.refresh_stats()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _return_to_result(self) -> None:
+        self.hide()
+        if self._on_show_result:
+            self._on_show_result()
 
     # ---- internal ----------------------------------------------------------
 
@@ -270,10 +311,14 @@ class MainWindow(QMainWindow):
         # History reloads itself in showEvent when its data changed.
         if self._tabs.widget(idx) is self.snip_tab:
             self.refresh_stats()
+        self._refresh_tokens()
 
-    def _on_pages_processed(self, n: int) -> None:
+    def _on_pages_processed(self, n: int, job_id: str | None = None) -> None:
         try:
-            self._storage.log_usage("pdf", n, config.get_pdf_price())
+            if job_id:
+                self._storage.log_pdf_usage(job_id, n, config.get_pdf_price())
+            else:
+                self._storage.log_usage("pdf", n, config.get_pdf_price())
         except Exception:
             pass
         self.refresh_stats()

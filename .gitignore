@@ -40,6 +40,13 @@ config.dat
 ocrmath.db
 cache/
 out/
+pdf_jobs.db
+llm_usage.db
+pdf_sources/
+
+# Local working notes and scratch files
+HANDOFF.md
+.tmp/
 
 # Build artifacts not in dist/
 *.spec.bak

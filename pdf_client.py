@@ -2,14 +2,19 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import os
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import requests
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from api_common import format_request_error
+from pdf_jobs import PdfJobStore
 
 API_BASE = "https://api.mathpix.com/v3/pdf"
 
@@ -91,34 +96,62 @@ def get_status(pdf_id: str, app_id: str, app_key: str,
 
 
 def download(pdf_id: str, ext: str, dest: Path, app_id: str, app_key: str,
-             timeout: int = 120) -> None:
+             timeout: int = 120, *,
+             check_cancel: Callable[[], None] | None = None) -> None:
     """ext is one of: mmd, docx, tex.zip, html, lines.json, pdf"""
     deadline = time.monotonic() + DOWNLOAD_TOTAL_TIMEOUT_S
     with _SESSION.get(f"{API_BASE}/{pdf_id}.{ext}",
                       headers=_headers(app_id, app_key),
                       timeout=timeout, stream=True) as resp:
         resp.raise_for_status()
+        if resp.status_code == 202:
+            raise _NotReady("输出格式仍在生成")
         dest.parent.mkdir(parents=True, exist_ok=True)
-        with open(dest, "wb") as fh:
-            for chunk in resp.iter_content(chunk_size=64 * 1024):
-                if time.monotonic() > deadline:
-                    raise requests.Timeout(
-                        f".{ext} download exceeded "
-                        f"{DOWNLOAD_TOTAL_TIMEOUT_S:.0f}s")
-                if chunk:
-                    fh.write(chunk)
+        # Publish only a complete download; interrupted transfers must not
+        # truncate an existing result or masquerade as a successful file.
+        tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=dest.parent, prefix=".ocrmath-",
+                                             suffix=".part", delete=False) as fh:
+                tmp = Path(fh.name)
+                for chunk in resp.iter_content(chunk_size=64 * 1024):
+                    if check_cancel:
+                        check_cancel()
+                    if time.monotonic() > deadline:
+                        raise requests.Timeout(
+                            f".{ext} download exceeded "
+                            f"{DOWNLOAD_TOTAL_TIMEOUT_S:.0f}s")
+                    if chunk:
+                        fh.write(chunk)
+            if check_cancel:
+                check_cancel()
+            os.replace(tmp, dest)
+        finally:
+            if tmp is not None:
+                tmp.unlink(missing_ok=True)
 
 
 class _JobFailed(Exception):
     """Ends the job with a user-facing message (cancel, stall, server error)."""
 
 
+class _NotReady(Exception):
+    pass
+
+
+def _file_hash(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 class PdfWorker(QThread):
     """Submit + poll + download all conversion formats.
 
-    Once the upload is accepted, Mathpix bills the conversion even if we stop
-    waiting for it, so every submitted job emits `billed` exactly once —
-    before finished_ok/failed — whatever the outcome."""
+    Emits cumulative billable pages before the result on each run. The UI
+    and usage ledger deduplicate these by persistent job ID on resume."""
 
     progress = pyqtSignal(int, str)         # percent, status text
     log = pyqtSignal(str)                    # log line
@@ -132,17 +165,29 @@ class PdfWorker(QThread):
     STALL_TIMEOUT_S = 600.0
 
     def __init__(self, pdf_path: Path, opts: PdfOptions, out_dir: Path,
-                 app_id: str, app_key: str, parent=None):
+                 app_id: str, app_key: str, parent=None, *,
+                 job_store: PdfJobStore | None = None, job: dict | None = None):
         super().__init__(parent)
         self._pdf = pdf_path
         self._opts = opts
         self._out = out_dir
         self._id = app_id
         self._key = app_key
+        self._job_store = job_store
+        self._job = job
         self._submitted = False
         self._state = ""        # last status reported by the server
         self._pages_done = 0    # num_pages_completed
         self._pages_total = 0   # num_pages
+
+    @property
+    def job_id(self) -> str | None:
+        return self._job["id"] if self._job else None
+
+    def _save_job(self, **changes) -> None:
+        if self._job is not None and self._job_store is not None:
+            self._job.update(changes)
+            self._job_store.save(self._job)
 
     def cancel(self) -> None:
         self.requestInterruption()
@@ -157,7 +202,26 @@ class PdfWorker(QThread):
         except Exception as exc:
             error = format_request_error(exc)
         if self._submitted:
-            self.billed.emit(self._billable_pages())
+            pages = self._billable_pages()
+            if self._job is not None:
+                # Never decrement already recorded estimates on resume.
+                pages = max(pages, self._job.get("pages", 0))
+                if not pages and not self._opts.page_ranges and self._state != "error":
+                    pages = self._job.get("page_count") or 0
+            try:
+                self._save_job(pages=pages)
+            except Exception as exc:
+                error = f"任务记录保存失败: {exc}"
+                saved = None
+            self.billed.emit(pages)
+        try:
+            status = "已完成" if saved is not None else "可重试"
+            if self._job is not None and not self._job.get("pdf_id"):
+                status = "未取得任务 ID"
+            self._save_job(status=status, error=error)
+        except Exception as exc:
+            error = f"任务记录保存失败: {exc}"
+            saved = None
         if saved is not None:
             self.finished_ok.emit(saved)
         else:
@@ -182,8 +246,20 @@ class PdfWorker(QThread):
             raise _JobFailed("Cancelled by user")
 
     def _do_run(self) -> list[Path]:
-        self.log.emit(f"Uploading {self._pdf.name}...")
-        pdf_id = submit_file(self._pdf, self._opts, self._id, self._key)
+        self._check_cancel()
+        pdf_id = self._job.get("pdf_id") if self._job else None
+        if pdf_id:
+            if self._job["app_id"] != self._id:
+                raise _JobFailed("请使用提交此任务时的 Mathpix app_id 恢复任务")
+            self.log.emit(f"Resuming {self._pdf.name}...")
+        else:
+            self._save_job(status="上传中")
+            self.log.emit(f"Uploading {self._pdf.name}...")
+            pdf_id = submit_file(self._pdf, self._opts, self._id, self._key)
+            self._submitted = True
+            self.log.emit(f"pdf_id = {pdf_id}")
+            # Persist the server ID before polling, downloading, or emitting UI signals.
+            self._save_job(pdf_id=pdf_id, status="处理中")
         self._submitted = True
         self.log.emit(f"pdf_id = {pdf_id}")
         self.progress.emit(0, "Submitted, processing...")
@@ -198,9 +274,14 @@ class PdfWorker(QThread):
                     f"No progress for {self.STALL_TIMEOUT_S:.0f}s, "
                     f"stopped polling")
             time.sleep(self.POLL_INTERVAL_S)
+            self._check_cancel()
             try:
                 status = get_status(pdf_id, self._id, self._key)
             except requests.RequestException as exc:
+                if (isinstance(exc, requests.HTTPError) and exc.response is not None
+                        and exc.response.status_code in (400, 401, 403, 404, 410)):
+                    raise _JobFailed(
+                        "任务不可访问、已过期或凭证无效；未重新上传。" + format_request_error(exc))
                 self.log.emit(f"Poll failed (will retry): {exc}")
                 continue
             st = status.get("status", "")
@@ -214,6 +295,8 @@ class PdfWorker(QThread):
                 self._pages_total = int(total)
             prog = (st, pct, done)
             if prog != last_progress:
+                self._save_job(status="处理中", server_status=st,
+                               pages_done=self._pages_done, pages_total=self._pages_total)
                 last_progress = prog
                 last_change = time.monotonic()
             text = f"{st}: {done}/{total} pages" if total else st
@@ -232,9 +315,37 @@ class PdfWorker(QThread):
         saved: list[Path] = []
         for ext in self._opts.formats:
             self._check_cancel()
+            previous = self._job.get("files", {}).get(ext) if self._job else None
+            if previous:
+                path = Path(previous["path"])
+                if path.is_file() and _file_hash(path) == previous["sha256"]:
+                    saved.append(path)
+                    self.log.emit(f"Already saved {path}")
+                    continue
             self.log.emit(f"Downloading .{ext}...")
-            dest = out_dir / f"{stem}.{ext}"
-            download(pdf_id, ext, dest, self._id, self._key)
+            # Overlay PDFs must never replace the source. Preserve previous
+            # exports too, including compound extensions such as tex.zip.
+            name = f"{stem}_ocr" if ext == "pdf" else stem
+            dest = out_dir / f"{name}.{ext}"
+            index = 1
+            while dest.exists() or dest.resolve() == self._pdf.resolve():
+                dest = out_dir / f"{name} ({index}).{ext}"
+                index += 1
+            deadline = time.monotonic() + self.STALL_TIMEOUT_S
+            while True:
+                self._check_cancel()
+                try:
+                    download(pdf_id, ext, dest, self._id, self._key,
+                             check_cancel=self._check_cancel)
+                    break
+                except _NotReady:
+                    if time.monotonic() >= deadline:
+                        raise _JobFailed(f".{ext} 输出仍未就绪，可稍后重试下载")
+                    self.log.emit(f".{ext} output is not ready, waiting...")
+                    time.sleep(self.POLL_INTERVAL_S)
+            if self._job is not None:
+                self._job["files"][ext] = {"path": str(dest.resolve()), "sha256": _file_hash(dest)}
+                self._save_job(status="下载中")
             self.log.emit(f"Saved {dest}")
             saved.append(dest)
 

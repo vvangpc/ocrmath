@@ -5,10 +5,10 @@ can share state across machines via their own WebDAV server (Nextcloud,
 JianGuoYun, hacdias/webdav, etc.).
 
 Envelope on the wire:
-    {"version": 1, "synced_at": <epoch>, "data": {...}}
+    {"version": 2, "synced_at": <epoch>, "data": {...}}
 
 Conflict resolution (see merge()):
-    counters: max(local, remote)              (offline accumulation safe)
+    counters: shared legacy baseline + per-device grow-only components
     creds + prices + rate: last-write-wins by settings_modified_at (when the
     user last edited them), carried inside `data`; remote files written by
     older versions lack it and fall back to the envelope's synced_at
@@ -26,10 +26,20 @@ from requests.auth import HTTPBasicAuth
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
 import config
+import counters
 
 
 # Process-wide lock so manual + auto sync don't race on PUT.
 _SYNC_LOCK = threading.Lock()
+
+
+class SyncConflict(RuntimeError):
+    """The remote resource changed after we read it."""
+
+
+def _v2_path(path: str) -> str:
+    path = path or config.DEFAULT_WEBDAV_PATH
+    return path[:-5] + ".v2.json" if path.endswith(".json") else path + ".v2.json"
 
 
 def _build_url(base: str, remote_path: str) -> str:
@@ -91,42 +101,52 @@ def ensure_collection(url: str, user: str, pw: str, remote_path: str,
 
 
 def upload(url: str, user: str, pw: str, remote_path: str,
-           payload: dict, timeout: float = 15) -> None:
+           payload: dict, timeout: float = 15, *, etag: str | None = None) -> None:
     full = _build_url(url, remote_path)
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    headers.update({"If-Match": etag} if etag else {"If-None-Match": "*"})
     r = requests.put(full, data=body,
                      auth=HTTPBasicAuth(user, pw),
-                     headers={"Content-Type": "application/json"},
+                     headers=headers,
                      timeout=timeout)
     if r.status_code in (404, 409):
         # Parent collection might not exist yet — create then retry once.
         ensure_collection(url, user, pw, remote_path, timeout=timeout)
         r = requests.put(full, data=body,
                          auth=HTTPBasicAuth(user, pw),
-                         headers={"Content-Type": "application/json"},
+                         headers=headers,
                          timeout=timeout)
-    if r.status_code >= 400:
+    if r.status_code == 412:
+        raise SyncConflict("远端数据已更新，正在重新合并")
+    if not 200 <= r.status_code < 300:
         raise RuntimeError(f"上传失败 HTTP {r.status_code}: {r.text[:200]}")
 
 
 def download(url: str, user: str, pw: str, remote_path: str,
-             timeout: float = 15) -> dict | None:
+             timeout: float = 15, *, with_etag: bool = False):
     """GET the sync envelope. Returns None if remote file (or its parent dir)
     is absent — Jianguoyun returns 409 'AncestorsNotFound' instead of 404."""
     full = _build_url(url, remote_path)
     r = requests.get(full, auth=HTTPBasicAuth(user, pw), timeout=timeout)
     if r.status_code == 404:
-        return None
+        return (None, None) if with_etag else None
     if r.status_code == 409:
         # AncestorsNotFound on Jianguoyun, or generic conflict — treat as
         # "no remote yet" so the upload step can create the parent collection.
-        return None
+        return (None, None) if with_etag else None
     if r.status_code >= 400:
         raise RuntimeError(f"下载失败 HTTP {r.status_code}: {r.text[:200]}")
     try:
-        return json.loads(r.content.decode("utf-8"))
+        value = json.loads(r.content.decode("utf-8"))
+        if not isinstance(value, dict) or not isinstance(value.get("data"), dict):
+            raise ValueError("同步文件结构无效")
     except Exception as exc:
         raise RuntimeError(f"远端 JSON 解析失败: {exc}") from None
+    etag = r.headers.get("ETag")
+    if with_etag and (not etag or etag.startswith("W/")):
+        raise RuntimeError("WebDAV 未提供强 ETag，无法安全合并多机写入；请启用服务器 ETag 支持")
+    return (value, etag) if with_etag else value
 
 
 def test_connection(url: str, user: str, pw: str,
@@ -160,18 +180,15 @@ def merge(local_data: dict, local_ts: float,
     """Combine local + remote payloads. See module docstring for rules."""
     if remote_data is None:
         return dict(local_data)
-    out: dict = {}
-    out["image_count"] = max(int(local_data.get("image_count", 0)),
-                             int(remote_data.get("image_count", 0)))
-    out["pdf_page_count"] = max(int(local_data.get("pdf_page_count", 0)),
-                                int(remote_data.get("pdf_page_count", 0)))
+    out = counters.merge(local_data, remote_data)
     remote_wins = remote_ts > local_ts
     winner = remote_data if remote_wins else local_data
+    other = local_data if remote_wins else remote_data
     for k in config.LWW_KEYS:
         if k in winner:
             out[k] = winner[k]
-        elif k in local_data:
-            out[k] = local_data[k]
+        elif k in other:
+            out[k] = other[k]
     out["settings_modified_at"] = remote_ts if remote_wins else local_ts
     return out
 
@@ -190,30 +207,35 @@ def sync_once(wd: dict | None = None) -> float:
     if not _SYNC_LOCK.acquire(blocking=False):
         raise RuntimeError("另一次同步正在进行")
     try:
-        local_data = config.get_syncable_payload()
-        local_ts = float(local_data["settings_modified_at"])
-
-        remote_env = download(wd["url"], wd["user"], wd["password"], wd["path"])
-        if remote_env is not None and isinstance(remote_env.get("data"), dict):
-            remote_data = remote_env["data"]
-            # Compare edit time with edit time: the envelope's synced_at only
-            # says when some device last synced, so an untouched device
-            # syncing must not beat an older-but-unsynced local edit.
-            remote_ts = remote_data.get("settings_modified_at")
-            if not isinstance(remote_ts, (int, float)):
-                remote_ts = remote_env.get("synced_at", 0)
-            merged = merge(local_data, local_ts,
-                           remote_data, float(remote_ts or 0))
-        else:
+        path = _v2_path(wd["path"])
+        for attempt in range(4):
+            local_data = config.get_syncable_payload()
+            local_ts = float(local_data["settings_modified_at"])
+            remote_env, etag = download(
+                wd["url"], wd["user"], wd["password"], path, with_etag=True)
+            if remote_env is not None and remote_env.get("version") != 2:
+                raise RuntimeError("不支持的同步协议版本，未覆盖远端文件")
+            if remote_env is not None and "counter_state" not in remote_env["data"]:
+                raise RuntimeError("新版同步文件缺少设备计数，未覆盖远端文件")
+            if remote_env is None:
+                # Import the old shared baseline once; old clients never write
+                # the v2 resource, so they cannot erase device components.
+                remote_env = download(wd["url"], wd["user"], wd["password"], wd["path"])
             merged = dict(local_data)
-
-        now = time.time()
-        # Upload first: persisting last_synced_at before a failed PUT would
-        # show a bogus "synced" timestamp and skew last-write-wins merges.
-        upload(wd["url"], wd["user"], wd["password"], wd["path"],
-               {"version": 1, "synced_at": now, "data": merged})
-        config.apply_synced_payload(merged, now, base_modified_at=local_ts)
-        return now
+            if remote_env is not None:
+                remote_data = remote_env["data"]
+                remote_ts = remote_data.get("settings_modified_at",
+                                            remote_env.get("synced_at", 0))
+                merged = merge(local_data, local_ts, remote_data, float(remote_ts or 0))
+            now = time.time()
+            try:
+                upload(wd["url"], wd["user"], wd["password"], path,
+                       {"version": 2, "synced_at": now, "data": merged}, etag=etag)
+            except SyncConflict:
+                continue
+            config.apply_synced_payload(merged, now, base_modified_at=local_ts)
+            return now
+        raise RuntimeError("远端连续发生写入冲突，请稍后重试同步")
     finally:
         _SYNC_LOCK.release()
 

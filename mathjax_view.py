@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 from PyQt6.QtCore import QUrl, QThread, pyqtSignal
-from PyQt6.QtWidgets import QSizePolicy
+from PyQt6.QtWidgets import QApplication, QSizePolicy
 
 try:
     from PyQt6.QtWebEngineWidgets import QWebEngineView
@@ -103,15 +103,19 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 <meta charset="utf-8">
 <style>
 html, body {
-  margin: 0; padding: 12px;
+  margin: 0; padding: 0;
   font-family: "Microsoft YaHei", "Microsoft YaHei UI", "PingFang SC",
                "Segoe UI", sans-serif;
-  font-size: 16px; color: #222;
-  background: white;
+  font-size: 16px; color: var(--ink);
+  background: var(--surface);
   word-wrap: break-word;
 }
-#content { text-align: center; }
-#content.left { text-align: left; }
+:root { --ink: #242b30; --surface: #f5f7f6; color-scheme: light; }
+:root.dark { --ink: #e6ebe9; --surface: #171c1d; color-scheme: dark; }
+body { padding: 22px; box-sizing: border-box; }
+#content { text-align: center; padding: 12px 0; font-size: 23px; }
+#content.left { text-align: left; white-space: pre-wrap; font-size: 15px; line-height: 1.85; }
+mjx-container { max-width: 100%; overflow-x: auto; overflow-y: hidden; }
 mjx-container { font-size: 1.05em !important; }
 .error {
   color: #b85a00;
@@ -169,9 +173,13 @@ function setContent(text, isMath) {
   }
 }
 function showMessage(msg) {
+  window._mjx_pending = null;
   const div = document.getElementById('content');
   div.classList.add('left');
   div.textContent = msg;
+}
+function setTheme(dark) {
+  document.documentElement.classList.toggle('dark', dark);
 }
 </script>
 </body>
@@ -291,6 +299,7 @@ if WEBENGINE_AVAILABLE:
             self.page().runJavaScript(js)
 
         def show_message(self, msg: str) -> None:
+            self._pending = None
             if not self._page_loaded:
                 self._pending_msg = msg
                 return
@@ -349,6 +358,10 @@ if WEBENGINE_AVAILABLE:
             self._page_loaded = bool(ok)
             if not ok:
                 return
+            app = QApplication.instance()
+            self.page().runJavaScript(
+                "if (typeof setTheme === 'function') setTheme({});".format(
+                    "true" if app and app.property("darkMode") else "false"))
             if self._pending is not None:
                 text, is_math = self._pending
                 self._pending = None
