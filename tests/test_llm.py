@@ -1,10 +1,9 @@
 from pathlib import Path
-from types import SimpleNamespace
 import unittest
 import time
 from unittest import mock
 
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtWidgets import QApplication
 from pypdf import PdfWriter
 
 import config
@@ -14,10 +13,8 @@ from llm_client import transcribe, cache_key
 from llm_store import LlmStore
 from llm_pdf import LlmPdfWorker, selected_pages
 from pdf_jobs import PdfJobStore
-from pdf_panel import PdfPanel
-from settings_dialog import SettingsDialog
+from pdf_service import PdfService
 from storage import Storage
-from history_panel import HistoryRow
 from tests.helpers import TempConfigTestCase
 
 SETTINGS = {"api_key": "test-secret", "model": "gpt-6-luna", "base_url": "https://api.openai.com/v1"}
@@ -98,7 +95,7 @@ class LlmApiTest(TempConfigTestCase):
         self.assertNotEqual(key, cache_key(b"same", {**SETTINGS, "base_url": "https://other/v1"}, "image"))
         self.assertNotEqual(key, cache_key(b"same", SETTINGS, "pdf_page"))
 
-    def test_credentials_roundtrip_and_stay_out_of_webdav(self):
+    def test_credentials_roundtrip_and_travel_through_webdav(self):
         config.save_settings({"image_provider": "llm", "pdf_provider": "llm",
                               "llm_api_key": "test-secret", "llm_model": "future-model",
                               "llm_base_url": "https://example.org/v1"})
@@ -106,8 +103,8 @@ class LlmApiTest(TempConfigTestCase):
         self.assertTrue(config.has_image_credentials())
         self.assertEqual(config.get_llm()["model"], "future-model")
         payload = config.get_syncable_payload()
-        self.assertNotIn("llm_api_key", payload)
-        self.assertNotIn("test-secret", str(payload))
+        self.assertEqual(payload["llm_api_key"], "test-secret")
+        self.assertEqual(payload["llm_model"], "future-model")
 
     def test_llm_only_settings_do_not_erase_other_devices_mathpix_credentials(self):
         config.save_settings({"app_id": "", "app_key": "", "llm_api_key": "secret"})
@@ -206,39 +203,70 @@ class LlmPdfTest(TempConfigTestCase):
                 selected_pages(value, 4)
 
 
-class LlmSettingsUiTest(TempConfigTestCase):
+class LlmCostTest(TempConfigTestCase):
+    def setUp(self):
+        super().setUp()
+        self.ledger = LlmStore(config.CONFIG_PATH.parent / "tokens.db")
+
+    def test_cached_tokens_are_billed_at_their_own_rate(self):
+        config.save_settings({"llm_prices": {"gpt-6-luna": {"input": 2, "cached": .5, "output": 8}}})
+        with mock.patch.object(llm_client.requests, "post", return_value=http()):
+            result = transcribe(b"PNG", SETTINGS, "image", self.ledger)
+        expected = (70 * 2 + 30 * .5 + 20 * 8) / 1_000_000
+        self.assertAlmostEqual(result["_cost_usd"], expected)
+        row = self.ledger.summary()[0]
+        self.assertAlmostEqual(row["cost_usd"], expected)
+        self.assertEqual(row["unpriced"], 0)
+
+    def test_dated_model_falls_back_to_the_requested_models_price(self):
+        config.save_settings({"llm_prices": {"gpt-6-luna": {"input": 1, "cached": 1, "output": 1}}})
+        body = {**response(), "model": "gpt-6-luna-2026-11-01"}
+        with mock.patch.object(llm_client.requests, "post", return_value=http(body)):
+            result = transcribe(b"PNG", SETTINGS, "image", self.ledger)
+        self.assertIn("_cost_usd", result)
+
+    def test_unpriced_request_stays_unpriced_after_a_price_is_set(self):
+        with mock.patch.object(llm_client.requests, "post", return_value=http()):
+            result = transcribe(b"PNG", SETTINGS, "image", self.ledger)
+        self.assertNotIn("_cost_usd", result)
+        config.save_settings({"llm_prices": {"gpt-6-luna": {"input": 1, "cached": 1, "output": 1}}})
+        row = self.ledger.summary()[0]
+        self.assertEqual((row["unpriced"], row["cost_usd"]), (1, 0))
+
+    def test_changing_a_price_does_not_rewrite_history(self):
+        price = {"input": 1_000_000, "cached": 0, "output": 0}
+        self.ledger.record("a", "m", "image", {"input_tokens": 1, "output_tokens": 0}, price=price)
+        self.ledger.record("b", "m", "image", {"input_tokens": 1, "output_tokens": 0},
+                           price={**price, "input": 2_000_000})
+        self.assertAlmostEqual(self.ledger.summary()[0]["cost_usd"], 3)
+
+    def test_unknown_usage_has_no_cost(self):
+        cost = self.ledger.record("a", "m", "image", None,
+                                  price={"input": 1, "cached": 1, "output": 1})
+        self.assertIsNone(cost)
+        row = self.ledger.summary()[0]
+        self.assertEqual((row["unknown"], row["unpriced"]), (1, 0))
+
+    def test_existing_ledger_is_migrated(self):
+        import sqlite3
+        path = config.CONFIG_PATH.parent / "old.db"
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE requests (id TEXT PRIMARY KEY, created REAL NOT NULL, model TEXT NOT NULL,"
+                     " kind TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,"
+                     " cached_tokens INTEGER NOT NULL, usage_known INTEGER NOT NULL)")
+        conn.execute("INSERT INTO requests VALUES ('a', 1, 'm', 'image', 5, 5, 0, 1)")
+        conn.commit()
+        conn.close()
+        row = LlmStore(path).summary()[0]
+        self.assertEqual((row["input_tokens"], row["unpriced"], row["cost_usd"]), (5, 1, 0))
+
+
+class LlmPdfServiceTest(TempConfigTestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_llm_only_configuration_does_not_require_mathpix_key(self):
-        dialog = SettingsDialog()
-        self.addCleanup(dialog.deleteLater)
-        dialog.image_provider.setCurrentIndex(1)
-        dialog.pdf_provider.setCurrentIndex(1)
-        dialog.llm_key_edit.setText("secret")
-        dialog.llm_model_edit.setText("next-vision-model")
-        dialog._save()
-        self.assertEqual(config.get_provider(), "llm")
-        self.assertEqual(config.get_llm()["model"], "next-vision-model")
-        self.assertIsNone(config.load())
-
-    def test_history_copies_mixed_markdown_without_extra_math_delimiters(self):
-        with mock.patch("history_panel.QGuiApplication.clipboard") as clipboard:
-            HistoryRow._copy(SimpleNamespace(rec=SimpleNamespace(latex="", text="公式 $x$ 的说明")))
-        clipboard.return_value.setText.assert_called_once_with("公式 $x$ 的说明")
-
-    def test_pdf_provider_limits_new_outputs_but_preserves_mathpix_options(self):
-        panel = PdfPanel(lambda: None, job_store=PdfJobStore(config.CONFIG_PATH.parent / "jobs.db"))
-        self.addCleanup(panel.deleteLater)
-        panel.provider_combo.setCurrentIndex(1)
-        self.assertTrue(panel.format_box.isHidden())
-        self.assertEqual(config.get_provider("pdf"), "llm")
-        panel.provider_combo.setCurrentIndex(0)
-        self.assertFalse(panel.format_box.isHidden())
-        self.assertTrue(panel.cb_docx.isChecked())
-
-    def test_panel_real_thread_runs_llm_and_restores_job_after_model_setting_changes(self):
+    def test_real_thread_runs_llm_and_restores_job_after_model_setting_changes(self):
         config.save_settings({"pdf_provider": "llm", "llm_api_key": "secret"})
         root = config.CONFIG_PATH.parent
         source = root / "one.pdf"
@@ -246,26 +274,26 @@ class LlmSettingsUiTest(TempConfigTestCase):
         writer.add_blank_page(200, 300)
         writer.write(source)
         jobs = PdfJobStore(root / "jobs.db")
-        panel = PdfPanel(lambda: None, job_store=jobs)
-        self.addCleanup(panel.deleteLater)
-        panel._set_pdf(source)
+        service = PdfService(lambda: None, job_store=jobs)
+        self.addCleanup(service.deleteLater)
         def wait():
             deadline = time.monotonic() + 5
-            while panel._worker is not None and time.monotonic() < deadline:
+            while service._worker is not None and time.monotonic() < deadline:
                 self.app.processEvents()
                 time.sleep(.005)
-            self.assertIsNone(panel._worker)
+            self.assertIsNone(service._worker)
         with mock.patch.object(llm_client.requests, "post", return_value=http()) as post, \
-             mock.patch.object(QMessageBox, "information"), \
-             mock.patch("pdf_panel.os.startfile", create=True):
-            panel._start()
+             mock.patch("pdf_service.os.startfile", create=True):
+            service.start({"path": str(source), "provider": "llm", "page_ranges": "",
+                           "out_dir": str(root / "out")})
             wait()
             self.assertEqual(post.call_count, 1)
             job = jobs.recent()[0]
             self.assertEqual(job["status"], "已完成")
             Path(job["files"]["md"]["path"]).unlink()
+            self.assertTrue(service.state()["jobs"][0]["can_resume"])
             config.save_settings({"llm_model": "new-model"})
-            panel._resume()
+            service.resume(job["id"])
             wait()
         self.assertEqual(post.call_count, 1)
         self.assertEqual(jobs.recent()[0]["model"], "gpt-6-luna")

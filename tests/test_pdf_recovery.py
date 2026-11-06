@@ -12,8 +12,9 @@ from pdf_jobs import PdfJobStore
 from storage import Storage
 import config
 from tests.helpers import TempConfigTestCase
-from PyQt6.QtWidgets import QApplication, QMessageBox
-from pdf_panel import PdfPanel
+from PyQt6.QtWidgets import QApplication
+from pdf_service import PdfService
+from ui_utils import UserError
 
 
 class PdfRecoveryTest(unittest.TestCase):
@@ -134,7 +135,7 @@ class PdfRecoveryTest(unittest.TestCase):
         self.assertAlmostEqual(summary["total_cost"], .05)
 
 
-class PdfRecoveryUiTest(TempConfigTestCase):
+class PdfRecoveryServiceTest(TempConfigTestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
@@ -146,22 +147,18 @@ class PdfRecoveryUiTest(TempConfigTestCase):
         self.addCleanup(storage.close)
         source = root / "paper.pdf"
         source.write_bytes(b"fake PDF")
-        def panel():
-            p = PdfPanel(lambda: {"app_id": "id", "app_key": "key"},
-                         lambda n, job: storage.log_pdf_usage(job, n, .005), job_store=store)
-            self.addCleanup(p.deleteLater)
-            return p
-        def wait(p):
+        def service():
+            s = PdfService(lambda: {"app_id": "id", "app_key": "key"},
+                           lambda n, job: storage.log_pdf_usage(job, n, .005), job_store=store)
+            self.addCleanup(s.deleteLater)
+            return s
+        def wait(s):
             deadline = time.monotonic() + 5
-            while p._worker is not None and time.monotonic() < deadline:
+            while s._worker is not None and time.monotonic() < deadline:
                 self.app.processEvents()
                 time.sleep(.005)
-            self.assertIsNone(p._worker)
-        first = panel()
-        first._pdf_path = source
-        first._page_count = 2
-        first.out_edit.setText(str(root / "out"))
-        first.cb_md.setChecked(False)
+            self.assertIsNone(s._worker)
+        first = service()
         seen = []
         fail = [True]
         def transfer(_id, ext, dest, *_a, **_kw):
@@ -169,21 +166,22 @@ class PdfRecoveryUiTest(TempConfigTestCase):
             if fail[0] and ext == "docx":
                 raise requests.ConnectionError("offline")
             dest.write_bytes(ext.encode())
+        params = {"path": str(source), "provider": "mathpix", "formats": ["mmd", "docx"],
+                  "page_ranges": "", "out_dir": str(root / "out")}
         with mock.patch.object(pdf_client.PdfWorker, "POLL_INTERVAL_S", 0), \
              mock.patch.object(pdf_client, "submit_file", return_value="server-id") as submit, \
              mock.patch.object(pdf_client, "get_status", return_value={
                  "status": "completed", "num_pages": 2, "num_pages_completed": 2}), \
              mock.patch.object(pdf_client, "download", side_effect=transfer), \
-             mock.patch.object(QMessageBox, "critical"), \
-             mock.patch.object(QMessageBox, "information"), \
-             mock.patch("pdf_panel.os.startfile", create=True):
-            first._start()
+             mock.patch("pdf_service.os.startfile", create=True):
+            self.assertIn("confirm", first.start(params))  # page count unreadable
+            first.start(params, confirmed=True)
             wait(first)
             self.assertEqual(config.get_counters()[1], 2)
             source.unlink()  # Recovery must not require the original file.
-            second = panel()
+            second = service()
             fail[0] = False
-            second._resume()
+            second.resume(store.recent()[0]["id"])
             wait(second)
         self.assertEqual(submit.call_count, 1)
         self.assertEqual(seen, ["mmd", "docx", "docx"])
@@ -192,9 +190,10 @@ class PdfRecoveryUiTest(TempConfigTestCase):
 
     def test_missing_server_id_cannot_silently_resubmit(self):
         store = PdfJobStore(config.CONFIG_PATH.parent / "jobs.db")
-        store.create(Path("missing.pdf"), asdict(pdf_client.PdfOptions()), Path("out"), "id")
-        panel = PdfPanel(lambda: {"app_id": "id", "app_key": "key"}, job_store=store)
-        self.addCleanup(panel.deleteLater)
-        with mock.patch("pdf_panel.PdfWorker") as worker, mock.patch.object(QMessageBox, "warning"):
-            panel._resume()
+        job = store.create(Path("missing.pdf"), asdict(pdf_client.PdfOptions()), Path("out"), "id")
+        service = PdfService(lambda: {"app_id": "id", "app_key": "key"}, job_store=store)
+        self.addCleanup(service.deleteLater)
+        self.assertFalse(service.state()["jobs"][0]["can_resume"])
+        with mock.patch("pdf_service.PdfWorker") as worker, self.assertRaises(UserError):
+            service.resume(job["id"])
         worker.assert_not_called()

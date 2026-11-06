@@ -156,6 +156,12 @@ class Storage:
             row = cur.fetchone()
         return self._row_to_recognition(row) if row else None
 
+    def get(self, rec_id: int) -> Recognition | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM recognitions WHERE id = ?", (rec_id,)).fetchone()
+        return self._row_to_recognition(row) if row else None
+
     def insert(self, sha256: str, png_bytes: bytes, result: dict) -> int:
         rel = f"{sha256[:2]}/{sha256}.png"
         path = self._png_path(sha256)
@@ -272,7 +278,8 @@ class Storage:
 
     def usage_summary(self, since_ts: float) -> dict[str, Any]:
         """Aggregate usage events on/after `since_ts`. Returns:
-        {'image_count': N, 'pdf_pages': M, 'total_cost': X}"""
+        {'image_count': N, 'pdf_pages': M, 'image_cost': A, 'pdf_cost': B,
+         'total_cost': X}"""
         with self._lock:
             cur = self._conn.execute(
                 "SELECT kind, "
@@ -282,13 +289,16 @@ class Storage:
                 (since_ts,),
             )
             rows = cur.fetchall()
-        out = {"image_count": 0, "pdf_pages": 0, "total_cost": 0.0}
+        out = {"image_count": 0, "pdf_pages": 0, "image_cost": 0.0,
+               "pdf_cost": 0.0, "total_cost": 0.0}
         for r in rows:
             kind = r["kind"]
             if kind == "image":
                 out["image_count"] = int(r["c"] or 0)
+                out["image_cost"] = float(r["s"] or 0.0)
             elif kind == "pdf":
                 out["pdf_pages"] = int(r["c"] or 0)
+                out["pdf_cost"] = float(r["s"] or 0.0)
             out["total_cost"] += float(r["s"] or 0.0)
         return out
 

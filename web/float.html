@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src file: qrc:; style-src file: 'unsafe-inline'; img-src file: data:; font-src file: data:">
+<title>OCRmath</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body class="float">
+<header class="float-head">
+  <div class="brand"><span class="logo" data-logo aria-hidden="true"></span><span class="brand-name">OCRmath</span></div>
+  <button class="quiet" id="sourceBtn" data-icon="photo" title="查看原图" aria-label="查看原图" aria-pressed="false"></button>
+</header>
+<main class="float-main">
+  <div class="source" id="source" hidden><img id="sourceImg" alt="当前识别的原图"></div>
+  <div class="notice" id="warning" hidden></div>
+  <div class="stage" id="stage"></div>
+  <pre class="code" id="code" hidden></pre>
+  <div class="format-row" id="formatRow" hidden>
+    <div class="seg" id="formats" role="group" aria-label="结果格式"></div>
+    <div class="seg" id="latexStyles" role="group" aria-label="LaTeX 复制格式" hidden>
+      <button data-style="0" title="纯 LaTeX">纯</button>
+      <button data-style="1" title="行内公式">$…$</button>
+      <button data-style="2" title="独立公式">$$…$$</button>
+    </div>
+  </div>
+  <button class="primary wide" id="primary"></button>
+  <div class="meta"><span id="meta"></span><button class="quiet" id="recapture">再截一张</button></div>
+</main>
+<footer class="float-foot">
+  <div class="group">
+    <button class="quiet" data-open="pdf" data-icon="file-text"><span id="pdfLabel">PDF</span></button>
+    <button class="quiet" data-open="history" data-icon="history">历史</button>
+    <button class="quiet" data-open="usage" data-icon="chart-bar">用量</button>
+  </div>
+  <div class="group">
+    <button class="quiet strong" id="provider"></button>
+    <button class="quiet" data-open="settings" data-icon="settings" title="设置" aria-label="设置"></button>
+  </div>
+</footer>
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+<script src="icons.js"></script>
+<script src="common.js"></script>
+<script src="float.js"></script>
+</body>
+</html>
