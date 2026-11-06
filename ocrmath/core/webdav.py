@@ -27,10 +27,10 @@ import requests
 from requests.auth import HTTPBasicAuth
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
-import config
-import counters
-import sync_crypto
-from sync_crypto import SyncPassphraseError
+from ocrmath.core import config
+from ocrmath.core import counters
+from ocrmath.core import sync_crypto
+from ocrmath.core.sync_crypto import SyncPassphraseError
 
 
 # Process-wide lock so manual + auto sync don't race on PUT.

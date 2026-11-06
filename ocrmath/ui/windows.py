@@ -14,11 +14,11 @@ from PyQt6.QtWebEngineCore import QWebEnginePage
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWidgets import QVBoxLayout, QWidget
 
-import config
-from pdf_service import PdfService
-from result_format import FloatModel
-from storage import Storage
-from ui_utils import UserError
+from ocrmath.core import config
+from ocrmath.ocr.pdf_service import PdfService
+from ocrmath.ui.result_format import FloatModel
+from ocrmath.core.storage import Storage
+from ocrmath.core.utils import UserError
 
 PAGES = ("pdf", "history", "usage", "settings")
 # Long enough to read "已复制到剪贴板" before the window leaves.

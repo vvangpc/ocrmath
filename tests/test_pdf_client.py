@@ -7,7 +7,7 @@ from unittest import mock
 
 import requests
 
-import pdf_client
+from ocrmath.ocr import pdf_client
 
 PROCESSING = {"status": "split", "percent_done": 20, "num_pages": 50,
               "num_pages_completed": 10}

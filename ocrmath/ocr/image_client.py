@@ -8,7 +8,7 @@ from typing import Any
 import requests
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from api_common import format_request_error
+from ocrmath.ocr.api_common import format_request_error
 
 API_URL = "https://api.mathpix.com/v3/text"
 

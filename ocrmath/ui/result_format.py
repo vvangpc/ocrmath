@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 
-import config
+from ocrmath.core import config
 
 
 def strip_outer_dollars(s: str) -> str:

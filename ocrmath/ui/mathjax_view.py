@@ -17,7 +17,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-import config
+from ocrmath.core import config
 
 # Pinned: this script runs inside the preview page, so an unpinned "@3" tag
 # would execute whatever the CDN serves next. Bump version + hash together.
@@ -46,7 +46,7 @@ def bundled_path() -> Path | None:
     if base:
         p = Path(base) / "mathjax" / MATHJAX_FILENAME
     else:
-        p = Path(__file__).resolve().parent / "vendor" / MATHJAX_FILENAME
+        p = Path(__file__).resolve().parents[2] / "vendor" / MATHJAX_FILENAME
     return p if p.is_file() else None
 
 

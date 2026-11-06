@@ -1,6 +1,6 @@
 """Regressions for result context, exact copying and the float window's rules."""
-import config
-from result_format import FloatModel, history_copy_text
+from ocrmath.core import config
+from ocrmath.ui.result_format import FloatModel, history_copy_text
 from tests.helpers import TempConfigTestCase
 
 

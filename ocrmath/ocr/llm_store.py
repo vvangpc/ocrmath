@@ -5,7 +5,7 @@ from pathlib import Path
 import sqlite3
 import time
 
-import config
+from ocrmath.core import config
 
 
 class LlmStore:

@@ -22,5 +22,11 @@ Homepage = "https://github.com/vvangpc/ocrmath"
 [project.optional-dependencies]
 build = ["pyinstaller"]
 
+[tool.setuptools.packages.find]
+include = ["ocrmath*"]
+
+[tool.setuptools.package-data]
+"ocrmath.ui" = ["web/*"]
+
 [tool.setuptools.dynamic]
 dependencies = { file = ["requirements.txt"] }

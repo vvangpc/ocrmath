@@ -7,14 +7,14 @@ from unittest import mock
 
 import requests
 
-import pdf_client
-from pdf_jobs import PdfJobStore
-from storage import Storage
-import config
+from ocrmath.ocr import pdf_client
+from ocrmath.ocr.pdf_jobs import PdfJobStore
+from ocrmath.core.storage import Storage
+from ocrmath.core import config
 from tests.helpers import TempConfigTestCase
 from PyQt6.QtWidgets import QApplication
-from pdf_service import PdfService
-from ui_utils import UserError
+from ocrmath.ocr.pdf_service import PdfService
+from ocrmath.core.utils import UserError
 
 
 class PdfRecoveryTest(unittest.TestCase):
@@ -173,7 +173,7 @@ class PdfRecoveryServiceTest(TempConfigTestCase):
              mock.patch.object(pdf_client, "get_status", return_value={
                  "status": "completed", "num_pages": 2, "num_pages_completed": 2}), \
              mock.patch.object(pdf_client, "download", side_effect=transfer), \
-             mock.patch("pdf_service.os.startfile", create=True):
+             mock.patch("ocrmath.ocr.pdf_service.os.startfile", create=True):
             self.assertIn("confirm", first.start(params))  # page count unreadable
             first.start(params, confirmed=True)
             wait(first)
@@ -194,6 +194,6 @@ class PdfRecoveryServiceTest(TempConfigTestCase):
         service = PdfService(lambda: {"app_id": "id", "app_key": "key"}, job_store=store)
         self.addCleanup(service.deleteLater)
         self.assertFalse(service.state()["jobs"][0]["can_resume"])
-        with mock.patch("pdf_service.PdfWorker") as worker, self.assertRaises(UserError):
+        with mock.patch("ocrmath.ocr.pdf_service.PdfWorker") as worker, self.assertRaises(UserError):
             service.resume(job["id"])
         worker.assert_not_called()

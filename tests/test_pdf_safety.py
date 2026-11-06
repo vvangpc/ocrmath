@@ -8,12 +8,12 @@ import requests
 from PyQt6.QtWidgets import QApplication
 from pypdf import PdfWriter
 
-import config
-import pdf_client
-from pdf_service import PdfService
-from pdf_jobs import PdfJobStore
+from ocrmath.core import config
+from ocrmath.ocr import pdf_client
+from ocrmath.ocr.pdf_service import PdfService
+from ocrmath.ocr.pdf_jobs import PdfJobStore
 from tests.helpers import TempConfigTestCase
-from ui_utils import UserError
+from ocrmath.core.utils import UserError
 
 
 class DownloadSafetyTest(unittest.TestCase):
@@ -116,7 +116,7 @@ class PdfServiceSafetyTest(TempConfigTestCase):
 
     def test_invalid_range_does_not_start_anything(self):
         for value in ("9", "2-1", "a"):
-            with mock.patch("pdf_service.PdfWorker") as worker, self.assertRaises(UserError):
+            with mock.patch("ocrmath.ocr.pdf_service.PdfWorker") as worker, self.assertRaises(UserError):
                 self.service.start({**self.params, "page_ranges": value})
             worker.assert_not_called()
         self.assertEqual(self.service.jobs.recent(), [])
@@ -127,8 +127,8 @@ class PdfServiceSafetyTest(TempConfigTestCase):
                 self.service.start({**self.params, "formats": formats})
 
     def test_large_job_asks_first_and_creates_nothing_until_confirmed(self):
-        with mock.patch("pdf_service.count_pdf_pages", return_value=101), \
-             mock.patch("pdf_service.PdfWorker") as worker:
+        with mock.patch("ocrmath.ocr.pdf_service.count_pdf_pages", return_value=101), \
+             mock.patch("ocrmath.ocr.pdf_service.PdfWorker") as worker:
             reply = self.service.start(self.params)
             self.assertIn("101", reply["confirm"])
             worker.assert_not_called()
@@ -153,7 +153,7 @@ class PdfServiceSafetyTest(TempConfigTestCase):
         with self.assertRaises(UserError):
             self.service.start({**params, "page_ranges": "9"})
         self.assertIsNone(self.service.inspect(str(self.path))["formats"])
-        with mock.patch("pdf_service.PdfWorker"), mock.patch.object(self.service, "_launch"):
+        with mock.patch("ocrmath.ocr.pdf_service.PdfWorker"), mock.patch.object(self.service, "_launch"):
             self.service.start(params)
         self.service._worker = None
         info = self.service.inspect(str(self.path))
@@ -161,14 +161,14 @@ class PdfServiceSafetyTest(TempConfigTestCase):
                          (["docx"], False, str(chosen)))
 
     def test_default_folder_is_not_remembered_and_a_missing_one_is_ignored(self):
-        with mock.patch("pdf_service.PdfWorker"), mock.patch.object(self.service, "_launch"):
+        with mock.patch("ocrmath.ocr.pdf_service.PdfWorker"), mock.patch.object(self.service, "_launch"):
             self.service.start({**self.params, "out_dir": str(self.root)})
         self.assertIsNone(config.get_ui_state()["pdf_out_dir"])
         config.update_ui_state(pdf_out_dir=str(self.root / "gone"))
         self.assertEqual(self.service.inspect(str(self.path))["out_dir"], str(self.root))
 
     def test_completion_opens_actual_output_directory(self):
-        with mock.patch("pdf_service.os.startfile", create=True) as open_folder:
+        with mock.patch("ocrmath.ocr.pdf_service.os.startfile", create=True) as open_folder:
             self.service._on_done([Path("actual-output/paper.mmd")])
         open_folder.assert_called_once_with(Path("actual-output"))
 

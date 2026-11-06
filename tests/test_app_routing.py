@@ -6,8 +6,8 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication, QMessageBox
 QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
 
-from main import App
-import config
+from ocrmath.app import App
+from ocrmath.core import config
 from tests.helpers import TempConfigTestCase
 
 
@@ -23,14 +23,14 @@ class ImageRoutingTest(TempConfigTestCase):
         config.save_settings({"image_provider": "llm", "llm_api_key": "secret"})
         app = self.fake_app()
         app.storage.lookup.return_value = None
-        with mock.patch("main.LlmImageWorker") as llm, mock.patch("main.ImageOcrWorker") as mathpix:
+        with mock.patch("ocrmath.app.LlmImageWorker") as llm, mock.patch("ocrmath.app.ImageOcrWorker") as mathpix:
             App._on_captured(app, b"png")
         llm.assert_called_once()
         mathpix.assert_not_called()
         self.assertEqual(app._pending_png, b"png")
         app._worker = None
         app.storage.lookup.return_value = SimpleNamespace(result={"text": "cached"})
-        with mock.patch("main.LlmImageWorker") as llm:
+        with mock.patch("ocrmath.app.LlmImageWorker") as llm:
             App._on_captured(app, b"png")
         llm.assert_not_called()
         app.result_win.show_result.assert_called_once_with({"text": "cached"}, from_cache=True)
@@ -40,7 +40,7 @@ class ImageRoutingTest(TempConfigTestCase):
         config.save_settings({"app_id": "id", "app_key": "key"})
         app = self.fake_app()
         app.storage.lookup.return_value = None
-        with mock.patch("main.ImageOcrWorker") as mathpix, mock.patch("main.LlmImageWorker") as llm:
+        with mock.patch("ocrmath.app.ImageOcrWorker") as mathpix, mock.patch("ocrmath.app.LlmImageWorker") as llm:
             App._on_captured(app, b"png")
         mathpix.assert_called_once_with(b"png", "id", "key")
         llm.assert_not_called()
@@ -61,7 +61,7 @@ class ImageRoutingTest(TempConfigTestCase):
         self.assertEqual(app._failed_png, b"same image")
         App._retry_last_image(app)
         self.assertEqual(app._retry_png, b"same image")
-        with mock.patch("main.QTimer.singleShot", side_effect=lambda _ms, callback: callback()):
+        with mock.patch("ocrmath.app.QTimer.singleShot", side_effect=lambda _ms, callback: callback()):
             App._clear_image_worker(app)
         app._on_captured.assert_called_once_with(b"same image")
         self.assertIsNone(app._retry_png)

@@ -18,13 +18,13 @@ from PyQt6.QtCore import QObject, QUrl, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import QFileDialog
 
-import config
-import mathjax_view
-import settings_service
-import webdav
-from llm_store import LlmStore
-from result_format import history_copy_text
-from ui_utils import UserError
+from ocrmath.core import config
+from ocrmath.ui import mathjax_view
+from ocrmath.ui import settings_service
+from ocrmath.core import webdav
+from ocrmath.ocr.llm_store import LlmStore
+from ocrmath.ui.result_format import history_copy_text
+from ocrmath.core.utils import UserError
 
 RPC_METHODS = frozenset({
     "mathjax_url", "copy_text", "open_tool", "open_folder",

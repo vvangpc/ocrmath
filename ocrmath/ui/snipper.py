@@ -196,7 +196,7 @@ def _pixmap_to_png_bytes(pix: QPixmap) -> bytes:
     return bytes(buf.data())
 
 
-# Standalone smoke test: python snipper.py -> press mouse -> writes test.png
+# Standalone smoke test: python -m ocrmath.ui.snipper -> press mouse -> writes test.png
 if __name__ == "__main__":
     import sys
     from PyQt6.QtWidgets import QApplication

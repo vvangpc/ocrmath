@@ -29,7 +29,7 @@ def _pixmap(size: int) -> tuple[QPixmap, QPainter]:
 # Near-black squircle tile carrying a white integral sign. Below 32px the tile
 # goes full-bleed and the stroke gets relatively heavier so the tray icon stays
 # readable at 16px. web/common.js draws the same glyph, and tools/make_icon.py
-# renders icon.ico from this code.
+# renders assets/icon.ico from this code.
 
 LOGO_SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
 

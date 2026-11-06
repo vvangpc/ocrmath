@@ -1,6 +1,6 @@
 """Manual smoke test for /v3/text. Usage:
 
-    python test_image_api.py path/to/equation.png
+    python tools/try_image_api.py path/to/equation.png
 
 Reads APP_ID/APP_KEY from env vars MATHPIX_APP_ID and MATHPIX_APP_KEY,
 or from %APPDATA%\\ocrmath\\config.dat if config.py is set up.
@@ -11,12 +11,14 @@ import os
 import sys
 from pathlib import Path
 
-from image_client import recognize
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from ocrmath.ocr.image_client import recognize
 
 
 def main() -> int:
     if len(sys.argv) != 2:
-        print("usage: python test_image_api.py <image.png>")
+        print("usage: python tools/try_image_api.py <image.png>")
         return 2
     img_path = Path(sys.argv[1])
     if not img_path.exists():
@@ -27,7 +29,7 @@ def main() -> int:
     app_key = os.environ.get("MATHPIX_APP_KEY")
     if not (app_id and app_key):
         try:
-            import config
+            from ocrmath.core import config
             creds = config.load()
             if creds:
                 app_id, app_key = creds["app_id"], creds["app_key"]

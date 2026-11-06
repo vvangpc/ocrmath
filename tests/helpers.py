@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import config
+from ocrmath.core import config
 
 
 class TempConfigTestCase(unittest.TestCase):
