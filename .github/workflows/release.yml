@@ -58,6 +58,16 @@ jobs:
       - name: Build app with PyInstaller
         run: python -m PyInstaller build.spec --clean --noconfirm
 
+      - name: Check packaged app startup
+        shell: pwsh
+        run: |
+          $app = Start-Process -FilePath dist/ocrmath/ocrmath.exe -ArgumentList '--smoke-test' -PassThru -WindowStyle Hidden
+          if (-not $app.WaitForExit(60000)) {
+            Stop-Process -Id $app.Id -Force
+            throw "Packaged app startup check timed out"
+          }
+          if ($app.ExitCode -ne 0) { throw "Packaged app startup check failed with exit code $($app.ExitCode)" }
+
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
 

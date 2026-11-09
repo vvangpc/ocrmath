@@ -6,6 +6,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- 补齐 Pillow 依赖，修复安装版启动时可能出现的 `PIL.__version__` 缺失错误；发布前检查打包程序的启动和 PDF 读写。
+
 ### Changed
 
 - 整理项目目录：代码移入 `ocrmath/` 包，图标移入 `assets/`，手动测试脚本移入 `tools/`。

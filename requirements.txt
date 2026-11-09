@@ -4,4 +4,5 @@ requests>=2.31,<3.0
 keyboard>=0.13,<0.14
 pywin32>=306,<400; sys_platform == "win32"
 pypdf>=4.0,<7.0
+Pillow>=10.4,<13.0
 cryptography>=42,<47
