@@ -6,9 +6,11 @@
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-11-09
+
 ### Fixed
 
-- 补齐 Pillow 依赖，修复安装版启动时可能出现的 `PIL.__version__` 缺失错误；发布前检查打包程序的启动和 PDF 读写。
+- 补齐 Pillow 依赖，修复 Windows 安装版启动时报 `PIL.__version__` 缺失的问题。发布前检查打包程序的启动和 PDF 读写。
 
 ### Changed
 
@@ -135,7 +137,8 @@
 
 - 首个公开版本：截屏公式识别、LaTeX 预览、本地缓存、历史记录、PDF 转换、可自定义全局快捷键、DPAPI 加密凭证。
 
-[Unreleased]: https://github.com/vvangpc/ocrmath/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/vvangpc/ocrmath/compare/v2.0.1...HEAD
+[2.0.1]: https://github.com/vvangpc/ocrmath/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/vvangpc/ocrmath/compare/v1.2.1...v2.0.0
 [1.2.1]: https://github.com/vvangpc/ocrmath/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/vvangpc/ocrmath/compare/v1.1.3...v1.2.0
